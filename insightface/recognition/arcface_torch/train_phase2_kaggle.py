@@ -155,6 +155,18 @@ def parse_args():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--save-every", type=int, default=1)
+    parser.add_argument(
+        "--save-every-steps",
+        type=int,
+        default=500,
+        help="Save latest.pt every N optimizer steps. Use 0 to disable step checkpoints.",
+    )
+    parser.add_argument(
+        "--max-train-minutes",
+        type=float,
+        default=0.0,
+        help="Stop cleanly after this many minutes and save a resumable checkpoint. 0 disables.",
+    )
     parser.add_argument("--freeze-backbone", action="store_true")
 
     parser.add_argument("--num-classes", type=int, default=None)
@@ -251,6 +263,20 @@ def build_dataset(args) -> Tuple[Dataset, int]:
     return dataset, int(num_classes)
 
 
+def make_train_loader(args, dataset, device, epoch):
+    generator = torch.Generator()
+    generator.manual_seed(args.seed + epoch)
+    return DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
+        drop_last=True,
+        generator=generator,
+    )
+
+
 def clean_state_dict_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     cleaned = {}
     prefixes = ("module.", "backbone.", "model.", "net.")
@@ -329,9 +355,12 @@ def make_checkpoint(
     scaler,
     config,
     metrics,
+    iteration_in_epoch=0,
+    epoch_state=None,
 ):
     return {
         "epoch": epoch,
+        "iteration_in_epoch": iteration_in_epoch,
         "global_step": global_step,
         "state_dict_backbone": backbone.state_dict(),
         "state_dict_head": head.state_dict(),
@@ -340,12 +369,54 @@ def make_checkpoint(
         "state_scaler": scaler.state_dict() if scaler is not None else None,
         "config": config,
         "metrics": metrics,
+        "epoch_state": epoch_state,
     }
+
+
+def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
+    if not checkpoint_config:
+        logging.warning("Checkpoint has no saved config; resume compatibility cannot be checked.")
+        return
+
+    hard_keys = ("loss", "backbone", "embedding_size", "num_classes")
+    mismatches = []
+    for key in hard_keys:
+        saved_value = checkpoint_config.get(key)
+        current_value = getattr(args, key, None)
+        if saved_value is not None and current_value != saved_value:
+            mismatches.append(f"{key}: checkpoint={saved_value!r} current={current_value!r}")
+    if mismatches:
+        raise ValueError(
+            "Refusing to resume from an incompatible checkpoint. "
+            + "; ".join(mismatches)
+        )
+
+    soft_keys = ("batch_size", "lr", "seed", "image_size", "freeze_backbone")
+    for key in soft_keys:
+        saved_value = checkpoint_config.get(key)
+        current_value = getattr(args, key, None)
+        if saved_value is not None and current_value != saved_value:
+            logging.warning(
+                "Resume config differs for %s: checkpoint=%r current=%r",
+                key,
+                saved_value,
+                current_value,
+            )
+
+    if iteration_in_epoch > 0:
+        for key in ("batch_size", "seed", "image_size"):
+            saved_value = checkpoint_config.get(key)
+            current_value = getattr(args, key, None)
+            if saved_value is not None and current_value != saved_value:
+                raise ValueError(
+                    f"Cannot resume inside an epoch after changing {key}. "
+                    "Use the original setting or resume from an epoch-end checkpoint."
+                )
 
 
 def load_latest_if_requested(args, exp_dir, backbone, head, optimizer, scheduler, scaler):
     if not args.resume:
-        return 0, 0, None
+        return 0, 0, 0, None, None
 
     latest_path = exp_dir / "latest.pt"
     if not latest_path.exists():
@@ -361,10 +432,19 @@ def load_latest_if_requested(args, exp_dir, backbone, head, optimizer, scheduler
         scaler.load_state_dict(checkpoint["state_scaler"])
 
     start_epoch = int(checkpoint.get("epoch", 0))
+    iteration_in_epoch = int(checkpoint.get("iteration_in_epoch", 0))
     global_step = int(checkpoint.get("global_step", 0))
     metrics = checkpoint.get("metrics")
-    logging.info("Resumed from %s at epoch=%d step=%d", latest_path, start_epoch, global_step)
-    return start_epoch, global_step, metrics
+    epoch_state = checkpoint.get("epoch_state")
+    validate_resume_config(args, checkpoint.get("config"), iteration_in_epoch)
+    logging.info(
+        "Resumed from %s at epoch=%d iteration=%d step=%d",
+        latest_path,
+        start_epoch,
+        iteration_in_epoch,
+        global_step,
+    )
+    return start_epoch, iteration_in_epoch, global_step, metrics, epoch_state
 
 
 def evaluate_if_available(backbone, data_dir, val_targets, device, batch_size):
@@ -412,16 +492,10 @@ def main():
     config["num_images"] = len(dataset)
     write_json(exp_dir / "config.json", config)
 
-    train_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=True,
-    )
+    train_loader = make_train_loader(args, dataset, device, epoch=0)
     if len(train_loader) == 0:
         raise ValueError("Training dataloader is empty. Reduce --batch-size or check data-dir.")
+    steps_per_epoch = len(train_loader)
 
     backbone = get_model(
         args.backbone,
@@ -448,13 +522,23 @@ def main():
         momentum=args.momentum,
         weight_decay=args.weight_decay,
     )
-    total_steps = max(1, len(train_loader) * args.epochs)
+    total_steps = max(1, steps_per_epoch * args.epochs)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    start_epoch, global_step, resumed_metrics = load_latest_if_requested(
+    (
+        start_epoch,
+        resume_iteration,
+        global_step,
+        resumed_metrics,
+        resumed_epoch_state,
+    ) = load_latest_if_requested(
         args, exp_dir, backbone, head, optimizer, scheduler, scaler
     )
+    if resume_iteration >= steps_per_epoch:
+        start_epoch += 1
+        resume_iteration = 0
+        resumed_epoch_state = None
 
     metrics = resumed_metrics or {
         "best_score": None,
@@ -474,6 +558,12 @@ def main():
         args.batch_size,
         args.lr,
     )
+    logging.info(
+        "steps_per_epoch=%d save_every_steps=%d max_train_minutes=%.1f",
+        steps_per_epoch,
+        args.save_every_steps,
+        args.max_train_minutes,
+    )
 
     if args.freeze_backbone:
         logging.info("Backbone is frozen. Training classification head only.")
@@ -481,17 +571,37 @@ def main():
         backbone.train()
     head.train()
 
+    run_start = time.time()
+
     for epoch in range(start_epoch, args.epochs):
+        train_loader = make_train_loader(args, dataset, device, epoch=epoch)
         epoch_start = time.time()
         if not args.freeze_backbone:
             backbone.train()
         head.train()
 
-        loss_sum = 0.0
-        norm_sum = 0.0
-        sample_count = 0
+        skip_until_iteration = resume_iteration if epoch == start_epoch else 0
+        if skip_until_iteration > 0:
+            logging.info(
+                "Resuming inside epoch %d: skipping first %d/%d batches",
+                epoch + 1,
+                skip_until_iteration,
+                len(train_loader),
+            )
+
+        if epoch == start_epoch and resumed_epoch_state:
+            loss_sum = float(resumed_epoch_state.get("loss_sum", 0.0))
+            norm_sum = float(resumed_epoch_state.get("norm_sum", 0.0))
+            sample_count = int(resumed_epoch_state.get("sample_count", 0))
+        else:
+            loss_sum = 0.0
+            norm_sum = 0.0
+            sample_count = 0
 
         for iteration, (images, labels) in enumerate(train_loader, start=1):
+            if iteration <= skip_until_iteration:
+                continue
+
             global_step += 1
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).long()
@@ -550,6 +660,44 @@ def main():
                     loss.item(),
                     optimizer.param_groups[0]["lr"],
                 )
+
+            should_save_step = (
+                args.save_every_steps > 0 and global_step % args.save_every_steps == 0
+            )
+            time_limit_hit = (
+                args.max_train_minutes > 0
+                and (time.time() - run_start) >= args.max_train_minutes * 60.0
+            )
+            if should_save_step or time_limit_hit:
+                checkpoint = make_checkpoint(
+                    epoch=epoch,
+                    iteration_in_epoch=iteration,
+                    global_step=global_step,
+                    backbone=backbone,
+                    head=head,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    config=config,
+                    metrics=metrics,
+                    epoch_state={
+                        "loss_sum": float(loss_sum),
+                        "norm_sum": float(norm_sum),
+                        "sample_count": int(sample_count),
+                    },
+                )
+                save_checkpoint(exp_dir / "latest.pt", checkpoint)
+                logging.info(
+                    "Saved resumable checkpoint at epoch=%d iter=%d step=%d",
+                    epoch + 1,
+                    iteration,
+                    global_step,
+                )
+                if time_limit_hit:
+                    logging.info(
+                        "max_train_minutes reached. Stop cleanly; rerun with --resume."
+                    )
+                    return
 
         epoch_loss = loss_sum / max(1, sample_count)
         epoch_norm = norm_sum / max(1, sample_count)
