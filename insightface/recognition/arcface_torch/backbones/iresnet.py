@@ -5,6 +5,16 @@ from torch.utils.checkpoint import checkpoint
 __all__ = ['iresnet18', 'iresnet34', 'iresnet50', 'iresnet100', 'iresnet200']
 using_ckpt = False
 
+
+def amp_autocast(enabled):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        try:
+            return torch.amp.autocast("cuda", enabled=enabled)
+        except TypeError:
+            pass
+    return torch.cuda.amp.autocast(enabled)
+
+
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
     return nn.Conv2d(in_planes,
@@ -146,7 +156,7 @@ class IResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        with torch.cuda.amp.autocast(self.fp16):
+        with amp_autocast(self.fp16):
             x = self.conv1(x)
             x = self.bn1(x)
             x = self.prelu(x)

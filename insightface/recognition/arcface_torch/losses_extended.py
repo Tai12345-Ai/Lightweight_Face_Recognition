@@ -187,9 +187,8 @@ class CurricularFaceLoss(nn.Module):
 class AdaFaceLoss(nn.Module):
     """AdaFace quality-adaptive margin loss.
 
-    If feature norms are unavailable, this loss falls back to ArcFace. The
-    fallback keeps old pipelines usable, while Phase 2 passes raw norms through
-    the margin head by default.
+    Phase 2 passes raw feature norms through the margin head by default. Norms
+    are required because AdaFace uses them as a quality proxy.
     """
 
     requires_norms = True
@@ -207,7 +206,7 @@ class AdaFaceLoss(nn.Module):
 
     def _margin_scaler(self, labels, norms):
         index, _ = _positive_indices(labels)
-        safe_norms = norms.clamp(min=0.001, max=100.0).detach()
+        safe_norms = norms.view(-1, 1).clamp(min=0.001, max=100.0).detach()
 
         with torch.no_grad():
             positive_norms = safe_norms[index]
@@ -225,7 +224,7 @@ class AdaFaceLoss(nn.Module):
 
     def forward(self, logits, labels, embeddings=None, norms=None):
         if norms is None:
-            return ArcFaceLoss(s=self.s, m=self.m)(logits, labels)
+            raise RuntimeError("AdaFaceLoss requires raw feature norms.")
 
         index, target = _positive_indices(labels)
         logits = logits.clone()
@@ -269,7 +268,7 @@ class CurriculumAwareAdaFaceLoss(AdaFaceLoss):
 
     def forward(self, logits, labels, embeddings=None, norms=None):
         if norms is None:
-            return CurricularFaceLoss(s=self.s, m=0.5, alpha=self.alpha)(logits, labels)
+            raise RuntimeError("CurriculumAwareAdaFaceLoss requires raw feature norms.")
 
         index, target = _positive_indices(labels)
         raw_logits = logits.clone()

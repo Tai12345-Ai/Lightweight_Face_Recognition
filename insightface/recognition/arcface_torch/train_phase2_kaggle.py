@@ -151,6 +151,12 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument(
+        "--warmup-epochs",
+        type=float,
+        default=1.0,
+        help="Linear LR warmup length in epochs before cosine annealing.",
+    )
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--eval-every", type=int, default=1)
@@ -231,6 +237,33 @@ def append_csv(path: Path, row: Dict):
         if not exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+def torch_load_cpu(path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def amp_autocast(use_amp):
+    if not use_amp:
+        return contextlib.nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        try:
+            return torch.amp.autocast("cuda", enabled=True)
+        except TypeError:
+            pass
+    return torch.cuda.amp.autocast(enabled=True)
+
+
+def make_grad_scaler(use_amp):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda", enabled=use_amp)
+        except TypeError:
+            pass
+    return torch.cuda.amp.GradScaler(enabled=use_amp)
 
 
 def build_dataset(args) -> Tuple[Dataset, int]:
@@ -315,7 +348,7 @@ def load_pretrained_backbone(backbone, checkpoint_path: Optional[str]):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(checkpoint_path)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch_load_cpu(checkpoint_path)
     state_dict = extract_backbone_state(checkpoint)
     result = backbone.load_state_dict(state_dict, strict=False)
     logging.info(
@@ -337,6 +370,28 @@ def trainable_parameters(backbone, head, freeze_backbone):
         backbone.eval()
         return list(head.parameters())
     return list(backbone.parameters()) + list(head.parameters())
+
+
+def build_scheduler(optimizer, total_steps, warmup_steps):
+    total_steps = max(1, int(total_steps))
+    warmup_steps = max(0, min(int(warmup_steps), total_steps - 1))
+    if warmup_steps <= 0:
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.01,
+        total_iters=warmup_steps,
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, total_steps - warmup_steps),
+    )
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine],
+        milestones=[warmup_steps],
+    )
 
 
 def save_checkpoint(path: Path, payload: Dict):
@@ -378,6 +433,12 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
         logging.warning("Checkpoint has no saved config; resume compatibility cannot be checked.")
         return
 
+    if checkpoint_config.get("warmup_steps") is None and getattr(args, "warmup_steps", 0) > 0:
+        raise ValueError(
+            "This checkpoint was created before warmup scheduling was added. "
+            "Resume it with --warmup-epochs 0, or restart this experiment."
+        )
+
     hard_keys = ("loss", "backbone", "embedding_size", "num_classes")
     mismatches = []
     for key in hard_keys:
@@ -391,7 +452,17 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
             + "; ".join(mismatches)
         )
 
-    soft_keys = ("batch_size", "lr", "seed", "image_size", "freeze_backbone")
+    soft_keys = (
+        "epochs",
+        "batch_size",
+        "lr",
+        "seed",
+        "image_size",
+        "freeze_backbone",
+        "warmup_epochs",
+        "warmup_steps",
+        "total_steps",
+    )
     for key in soft_keys:
         saved_value = checkpoint_config.get(key)
         current_value = getattr(args, key, None)
@@ -422,7 +493,10 @@ def load_latest_if_requested(args, exp_dir, backbone, head, optimizer, scheduler
     if not latest_path.exists():
         raise FileNotFoundError(f"--resume requested but {latest_path} does not exist")
 
-    checkpoint = torch.load(latest_path, map_location="cpu")
+    checkpoint = torch_load_cpu(latest_path)
+    iteration_in_epoch = int(checkpoint.get("iteration_in_epoch", 0))
+    validate_resume_config(args, checkpoint.get("config"), iteration_in_epoch)
+
     backbone.load_state_dict(checkpoint["state_dict_backbone"])
     head.load_state_dict(checkpoint["state_dict_head"])
     optimizer.load_state_dict(checkpoint["state_optimizer"])
@@ -432,11 +506,9 @@ def load_latest_if_requested(args, exp_dir, backbone, head, optimizer, scheduler
         scaler.load_state_dict(checkpoint["state_scaler"])
 
     start_epoch = int(checkpoint.get("epoch", 0))
-    iteration_in_epoch = int(checkpoint.get("iteration_in_epoch", 0))
     global_step = int(checkpoint.get("global_step", 0))
     metrics = checkpoint.get("metrics")
     epoch_state = checkpoint.get("epoch_state")
-    validate_resume_config(args, checkpoint.get("config"), iteration_in_epoch)
     logging.info(
         "Resumed from %s at epoch=%d iteration=%d step=%d",
         latest_path,
@@ -523,8 +595,17 @@ def main():
         weight_decay=args.weight_decay,
     )
     total_steps = max(1, steps_per_epoch * args.epochs)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    warmup_steps = int(round(steps_per_epoch * max(0.0, args.warmup_epochs)))
+    warmup_steps = max(0, min(warmup_steps, total_steps - 1))
+    args.total_steps = total_steps
+    args.warmup_steps = warmup_steps
+    config["steps_per_epoch"] = steps_per_epoch
+    config["total_steps"] = total_steps
+    config["warmup_steps"] = warmup_steps
+    write_json(exp_dir / "config.json", config)
+
+    scheduler = build_scheduler(optimizer, total_steps, warmup_steps)
+    scaler = make_grad_scaler(use_amp)
 
     (
         start_epoch,
@@ -563,6 +644,11 @@ def main():
         steps_per_epoch,
         args.save_every_steps,
         args.max_train_minutes,
+    )
+    logging.info(
+        "lr_schedule=linear_warmup_cosine total_steps=%d warmup_steps=%d",
+        total_steps,
+        warmup_steps,
     )
 
     if args.freeze_backbone:
@@ -607,11 +693,7 @@ def main():
             labels = labels.to(device, non_blocking=True).long()
 
             optimizer.zero_grad(set_to_none=True)
-            amp_context = (
-                torch.cuda.amp.autocast(enabled=use_amp)
-                if device.type == "cuda"
-                else contextlib.nullcontext()
-            )
+            amp_context = amp_autocast(use_amp) if device.type == "cuda" else contextlib.nullcontext()
             with amp_context:
                 if args.freeze_backbone:
                     with torch.no_grad():

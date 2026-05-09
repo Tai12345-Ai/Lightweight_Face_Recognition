@@ -47,6 +47,7 @@ BACKBONE = "r18"
 EPOCHS = 20
 BATCH_SIZE = 128
 LR = 0.01
+WARMUP_EPOCHS = 1.0
 EVAL_EVERY = 2
 SAVE_EVERY_STEPS = 300
 MAX_TRAIN_MINUTES = 600
@@ -162,6 +163,8 @@ def train_loss(loss_name):
         str(BATCH_SIZE),
         "--lr",
         str(LR),
+        "--warmup-epochs",
+        str(WARMUP_EPOCHS),
         "--eval-every",
         str(EVAL_EVERY),
         "--save-every",

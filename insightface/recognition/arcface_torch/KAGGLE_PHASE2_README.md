@@ -58,6 +58,7 @@ Recommended starting point:
 --epochs 20 \
 --batch-size 128 \
 --lr 0.01 \
+--warmup-epochs 1 \
 --fp16 \
 --eval-every 2 \
 --save-every 1 \
@@ -69,6 +70,8 @@ If Kaggle gives a smaller GPU or you hit OOM, reduce `--batch-size` to `64`.
 If one epoch is very slow, use `--eval-every 2` or disable validation with
 `--val-targets=` and evaluate later. `--max-train-minutes` should be lower than
 your notebook session limit so the script can save and exit cleanly.
+`--warmup-epochs 1` warms up the random classification head before cosine LR
+decay.
 
 Recommended training queue:
 
@@ -91,6 +94,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every 1 \
@@ -110,6 +114,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -128,6 +133,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -146,6 +152,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -164,6 +171,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -182,6 +190,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -206,6 +215,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -251,6 +261,7 @@ python train_phase2_kaggle.py \
   --epochs 20 \
   --batch-size 128 \
   --lr 0.01 \
+  --warmup-epochs 1 \
   --fp16 \
   --eval-every 2 \
   --save-every-steps 300 \
@@ -260,6 +271,9 @@ python train_phase2_kaggle.py \
 
 Use the same `--output-dir` and `--loss`. Increase `--epochs` only if you want
 to continue beyond the original target.
+
+`partial_fc_v2.py` is not used by `train_phase2_kaggle.py`; it is kept for the
+separate distributed/multi-GPU InsightFace training path.
 
 ## 11. Backup outputs as zip
 
