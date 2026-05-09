@@ -35,6 +35,8 @@ class PartialFC_V2(torch.nn.Module):
         num_classes: int,
         sample_rate: float = 1.0,
         fp16: bool = False,
+        pass_embeddings_to_loss: bool = False,
+        return_norms: bool = False,
     ):
         """
         Paramenters:
@@ -57,6 +59,8 @@ class PartialFC_V2(torch.nn.Module):
         self.embedding_size = embedding_size
         self.sample_rate: float = sample_rate
         self.fp16 = fp16
+        self.pass_embeddings_to_loss = pass_embeddings_to_loss
+        self.return_norms = return_norms
         self.num_local: int = num_classes // self.world_size + int(
             self.rank < num_classes % self.world_size
         )
@@ -155,6 +159,11 @@ class PartialFC_V2(torch.nn.Module):
             weight = self.weight
 
         with torch.cuda.amp.autocast(self.fp16):
+            raw_norms = (
+                torch.norm(embeddings, dim=1, keepdim=True)
+                if self.pass_embeddings_to_loss or self.return_norms
+                else None
+            )
             norm_embeddings = normalize(embeddings)
             norm_weight_activated = normalize(weight)
             logits = linear(norm_embeddings, norm_weight_activated)
@@ -162,8 +171,15 @@ class PartialFC_V2(torch.nn.Module):
             logits = logits.float()
         logits = logits.clamp(-1, 1)
 
-        logits = self.margin_softmax(logits, labels)
+        if self.pass_embeddings_to_loss:
+            logits = self.margin_softmax(
+                logits, labels, embeddings=embeddings, norms=raw_norms
+            )
+        else:
+            logits = self.margin_softmax(logits, labels)
         loss = self.dist_cross_entropy(logits, labels)
+        if self.return_norms:
+            return loss, raw_norms
         return loss
 
 

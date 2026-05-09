@@ -24,7 +24,7 @@ class CombinedMarginLoss(torch.nn.Module):
         self.easy_margin = False
 
 
-    def forward(self, logits, labels):
+    def forward(self, logits, labels, embeddings=None, norms=None):
         index_positive = torch.where(labels != -1)[0]
 
         if self.interclass_filtering_threshold > 0:
@@ -71,7 +71,8 @@ class ArcFace(torch.nn.Module):
         self.easy_margin = False
 
 
-    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor,
+                embeddings=None, norms=None):
         index = torch.where(labels != -1)[0]
         target_logit = logits[index, labels[index].view(-1)]
 
@@ -91,7 +92,8 @@ class CosFace(torch.nn.Module):
         self.s = s
         self.m = m
 
-    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor,
+                embeddings=None, norms=None):
         index = torch.where(labels != -1)[0]
         target_logit = logits[index, labels[index].view(-1)]
         final_target_logit = target_logit - self.m

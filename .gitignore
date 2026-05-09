@@ -1,0 +1,24 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local InsightFace/cache folders
+.insightface/
+
+# Datasets and generated training outputs
+dataset/
+datasets/
+data/
+outputs/
+work_dirs/
+checkpoints/
+checkpoint/
+
+# Large model/checkpoint/artifact files
+*.pth
+*.pt
+*.onnx
+*.bin
+*.rec
+*.idx
