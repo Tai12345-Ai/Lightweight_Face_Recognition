@@ -38,6 +38,10 @@ def _arcface_target(target_logit: torch.Tensor, margin: torch.Tensor) -> torch.T
     return torch.cos(theta + margin)
 
 
+def _same_dtype(value: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    return value.to(dtype=reference.dtype)
+
+
 class CombinedMarginLossWrapper(nn.Module):
     """Adapter for the original CombinedMarginLoss with the extended interface."""
 
@@ -79,7 +83,7 @@ class ArcFaceLoss(nn.Module):
         target_logit = logits[index, target]
         logits[index, target] = _arcface_target(
             target_logit, torch.full_like(target_logit, self.m)
-        )
+        ).to(dtype=logits.dtype)
         return logits * self.s
 
 
@@ -135,7 +139,7 @@ class ElasticFaceLoss(nn.Module):
         else:
             margins = torch.full_like(target_logit, self.m)
 
-        logits[index, target] = _arcface_target(target_logit, margins)
+        logits[index, target] = _arcface_target(target_logit, margins).to(dtype=logits.dtype)
         return logits * self.s
 
 
@@ -169,7 +173,7 @@ class CurricularFaceLoss(nn.Module):
             target_logit > self.threshold,
             cos_theta_m,
             target_logit - self.mm,
-        )
+        ).to(dtype=logits.dtype)
 
         with torch.no_grad():
             self.t.mul_(self.alpha).add_(target_logit.mean() * (1.0 - self.alpha))
@@ -178,7 +182,8 @@ class CurricularFaceLoss(nn.Module):
         one_hot = torch.zeros_like(rows, dtype=torch.bool)
         one_hot.scatter_(1, target.view(-1, 1), True)
         hard_mask = (rows > cos_theta_m.view(-1, 1)) & (~one_hot)
-        rows = torch.where(hard_mask, rows * (self.t + rows), rows)
+        t = self.t.to(dtype=rows.dtype)
+        rows = torch.where(hard_mask, rows * (t + rows), rows).to(dtype=rows.dtype)
         rows.scatter_(1, target.view(-1, 1), final_target.view(-1, 1))
         logits[index] = rows
         return logits * self.s
@@ -236,14 +241,16 @@ class AdaFaceLoss(nn.Module):
 
         m_arc = torch.zeros_like(rows)
         g_angular = -self.m * margin_scaler
-        m_arc.scatter_(1, target.view(-1, 1), g_angular.view(-1, 1))
+        m_arc.scatter_(1, target.view(-1, 1), _same_dtype(g_angular, rows).view(-1, 1))
 
         theta = _safe_cosine(rows, eps=self.eps).acos()
-        rows = torch.cos((theta + m_arc).clamp(self.eps, math.pi - self.eps))
+        rows = torch.cos((theta + m_arc).clamp(self.eps, math.pi - self.eps)).to(
+            dtype=logits.dtype
+        )
 
         m_cos = torch.zeros_like(rows)
         g_add = self.m + self.m * margin_scaler
-        m_cos.scatter_(1, target.view(-1, 1), g_add.view(-1, 1))
+        m_cos.scatter_(1, target.view(-1, 1), _same_dtype(g_add, rows).view(-1, 1))
         rows = rows - m_cos
 
         logits[index] = rows
@@ -288,7 +295,8 @@ class CurriculumAwareAdaFaceLoss(AdaFaceLoss):
         one_hot.scatter_(1, target.view(-1, 1), True)
         hard_threshold = target_after_ada.detach().view(-1, 1)
         hard_mask = (rows > hard_threshold) & (~one_hot)
-        rows = torch.where(hard_mask, rows * (self.t + rows), rows)
+        t = self.t.to(dtype=rows.dtype)
+        rows = torch.where(hard_mask, rows * (t + rows), rows).to(dtype=rows.dtype)
         rows.scatter_(1, target.view(-1, 1), target_after_ada.view(-1, 1))
         ada_logits[index] = rows
         return ada_logits * self.s
@@ -341,7 +349,7 @@ class MagFaceLoss(nn.Module):
         positive_norms = norms[index].view(-1)
         margins = self._calc_margin(positive_norms)
         target_logit = logits[index, target]
-        logits[index, target] = _arcface_target(target_logit, margins)
+        logits[index, target] = _arcface_target(target_logit, margins).to(dtype=logits.dtype)
         self._last_mag_reg = self.lambda_g * self._calc_reg(positive_norms).mean()
         return logits * self.s
 
