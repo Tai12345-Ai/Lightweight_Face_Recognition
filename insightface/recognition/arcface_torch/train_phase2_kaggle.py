@@ -4,6 +4,7 @@
 import argparse
 import contextlib
 import csv
+import io
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from backbones import get_model
 from losses_extended import available_phase2_losses, get_phase2_loss
+from recordio_fallback import MXIndexedRecordIOFallback, unpack_image_record
 
 
 class SyntheticDataset(Dataset):
@@ -49,20 +51,31 @@ class SyntheticDataset(Dataset):
 class MXFaceDataset(Dataset):
     """Lazy MXNet RecordIO dataset.
 
-    Importing mxnet is delayed so ImageFolder training does not require mxnet.
+    Uses mxnet when available, with a small pure-Python RecordIO fallback for
+    Kaggle/Python images where mxnet wheels are not importable.
     """
 
     def __init__(self, root_dir, image_size=112):
-        import mxnet as mx
-
-        self.mx = mx
         self.root_dir = root_dir
         self.image_size = image_size
+        self.mx = None
         rec_path = os.path.join(root_dir, "train.rec")
         idx_path = os.path.join(root_dir, "train.idx")
-        self.imgrec = mx.recordio.MXIndexedRecordIO(idx_path, rec_path, "r")
 
-        header, _ = mx.recordio.unpack(self.imgrec.read_idx(0))
+        try:
+            import mxnet as mx
+
+            self.mx = mx
+            self.imgrec = mx.recordio.MXIndexedRecordIO(idx_path, rec_path, "r")
+            header, _ = mx.recordio.unpack(self.imgrec.read_idx(0))
+        except Exception as exc:
+            logging.warning(
+                "mxnet RecordIO reader unavailable (%s). Using pure-Python fallback.",
+                exc,
+            )
+            self.imgrec = MXIndexedRecordIOFallback(idx_path, rec_path)
+            header, _ = unpack_image_record(self.imgrec.read_idx(0))
+
         self.num_classes = None
         if header.flag > 0:
             self.num_images = int(header.label[0])
@@ -86,12 +99,18 @@ class MXFaceDataset(Dataset):
 
     def __getitem__(self, index):
         idx = self.imgidx[index]
-        header, image_bytes = self.mx.recordio.unpack(self.imgrec.read_idx(idx))
+        if self.mx is not None:
+            header, image_bytes = self.mx.recordio.unpack(self.imgrec.read_idx(idx))
+        else:
+            header, image_bytes = unpack_image_record(self.imgrec.read_idx(idx))
         label = header.label
         if not isinstance(label, (int, float)):
             label = label[0]
-        image = self.mx.image.imdecode(image_bytes).asnumpy()
-        image = Image.fromarray(image.astype(np.uint8))
+        if self.mx is not None:
+            image = self.mx.image.imdecode(image_bytes).asnumpy()
+            image = Image.fromarray(image.astype(np.uint8))
+        else:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         return self.transform(image), torch.tensor(int(label), dtype=torch.long)
 
 
@@ -526,8 +545,11 @@ def evaluate_if_available(backbone, data_dir, val_targets, device, batch_size):
     try:
         from eval import verification
     except Exception as exc:
-        logging.warning("Verification skipped because eval dependencies are unavailable: %s", exc)
-        return {}
+        logging.warning(
+            "eval.verification unavailable (%s). Using PIL verification fallback.",
+            exc,
+        )
+        verification = None
 
     results = {}
     eval_model = DeviceBackbone(backbone, device)
@@ -538,8 +560,28 @@ def evaluate_if_available(backbone, data_dir, val_targets, device, batch_size):
         if not os.path.exists(bin_path):
             continue
         logging.info("Evaluating %s", target)
-        data_set = verification.load_bin(bin_path, (112, 112))
-        _, _, acc, std, xnorm, _ = verification.test(data_set, eval_model, batch_size, 10)
+        if verification is not None:
+            data_set = verification.load_bin(bin_path, (112, 112))
+            _, _, acc, std, xnorm, _ = verification.test(data_set, eval_model, batch_size, 10)
+        else:
+            from eval_degraded_phase2 import (
+                DegradationCase,
+                evaluate_embeddings,
+                extract_embeddings,
+                load_bin_images,
+            )
+
+            images, issame_list = load_bin_images(Path(bin_path))
+            embeddings = extract_embeddings(
+                images,
+                backbone,
+                DegradationCase("clean", "clean"),
+                batch_size,
+                device,
+                seed=0,
+            )
+            acc, std, _ = evaluate_embeddings(embeddings, issame_list)
+            xnorm = 0.0
         results[target] = {"accuracy": float(acc), "std": float(std), "xnorm": float(xnorm)}
         logging.info("%s accuracy=%.5f std=%.5f xnorm=%.3f", target, acc, std, xnorm)
     return results
