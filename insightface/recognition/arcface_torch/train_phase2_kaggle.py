@@ -748,13 +748,16 @@ def main():
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(params, 5.0)
+                old_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
+                if scaler.get_scale() >= old_scale:
+                    scheduler.step()
             else:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(params, 5.0)
                 optimizer.step()
-            scheduler.step()
+                scheduler.step()
 
             batch_size = labels.size(0)
             loss_sum += loss.item() * batch_size
