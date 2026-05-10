@@ -5,6 +5,7 @@ the indexed RecordIO files used by InsightFace datasets.
 """
 
 import struct
+import os
 from collections import namedtuple
 from pathlib import Path
 
@@ -43,14 +44,29 @@ class MXIndexedRecordIOFallback:
                 key = int(parts[0])
                 self.idx[key] = int(parts[1])
                 self.keys.append(key)
+        self._pid = None
+        self._record = None
+        self._open_record()
+
+    def _open_record(self):
+        if self._record is not None:
+            self._record.close()
         self._record = open(self.rec_path, "rb")
+        self._pid = os.getpid()
+
+    def _ensure_process_file(self):
+        if self._record is None or self._pid != os.getpid():
+            self._open_record()
 
     def read_idx(self, idx):
+        self._ensure_process_file()
         self._record.seek(self.idx[int(idx)])
         return self._read_record()
 
     def close(self):
-        self._record.close()
+        if self._record is not None:
+            self._record.close()
+            self._record = None
 
     def _read_segment(self):
         magic_raw = self._record.read(_UINT32.size)
