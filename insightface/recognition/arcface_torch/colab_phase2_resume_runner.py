@@ -9,12 +9,12 @@
 # Default training queue:
 #
 # 1. arcface
-# 2. cosface
-# 3. adaface
-# 4. curricularface
-# 5. elasticface
-# 6. magface
-# 7. proposed
+# 2. adaface
+# 3. curricularface
+# 4. proposed
+# 5. magface
+# 6. elasticface
+# 7. cosface
 
 # %%
 from google.colab import drive
@@ -56,12 +56,12 @@ VAL_TARGETS = ""  # Use "lfw,cfp_fp,agedb_30" only if those .bin files exist.
 
 LOSS_QUEUE = [
     "arcface",
-    "cosface",
     "adaface",
     "curricularface",
-    "elasticface",
-    "magface",
     "proposed",
+    "magface",
+    "elasticface",
+    "cosface",
 ]
 
 # %% [markdown]

@@ -39,7 +39,7 @@ export OUT=/kaggle/working/outputs
 Outputs are written to:
 
 ```text
-$OUT/phase2_loss/r18_<loss>/
+$OUT/phase2_loss/r18_{loss}/
   latest.pt
   best.pth
   train_log.csv
@@ -76,11 +76,22 @@ decay.
 Recommended training queue:
 
 ```text
-arcface -> cosface -> adaface -> curricularface -> elasticface -> magface -> proposed
+arcface -> adaface -> curricularface -> proposed -> magface -> elasticface -> cosface
 ```
 
 The Colab runner uses this order by default. If quota runs out, it stops at the
 current loss and resumes that same loss in the next session.
+
+Why this order:
+
+* `arcface` is the main baseline.
+* `adaface` represents quality-adaptive margin.
+* `curricularface` represents curriculum/hard-negative modulation.
+* `proposed` should run early because it combines AdaFace-style quality
+  adaptation and CurricularFace-style hard-negative modulation.
+* `magface` is an important quality/magnitude-aware baseline.
+* `elasticface` and `cosface` are additional baselines and can run later if
+  Kaggle quota is limited.
 
 ## 3. Train ArcFace
 
@@ -243,7 +254,7 @@ python train_phase2_kaggle.py \
 `--resume` automatically loads:
 
 ```text
-$OUT/phase2_loss/r18_<loss>/latest.pt
+$OUT/phase2_loss/r18_{loss}/latest.pt
 ```
 
 `latest.pt` is saved every `--save-every-steps` optimizer steps and at epoch
@@ -292,7 +303,7 @@ queue in order, and backs up each loss folder after every run. The matching
 Default Colab queue:
 
 ```text
-arcface -> cosface -> adaface -> curricularface -> elasticface -> magface -> proposed
+arcface -> adaface -> curricularface -> proposed -> magface -> elasticface -> cosface
 ```
 
 Workflow:
@@ -314,6 +325,58 @@ Workflow:
 To move back from Colab to Kaggle, zip or upload the same
 `outputs/phase2_loss` folder, then copy it into `/kaggle/working/outputs` before
 running `--resume`.
+
+## Degraded evaluation after training
+
+Degraded evaluation is eval-only. It does not degrade the training set and does
+not change any checkpoint. Use it after training to measure how robust each loss
+is when verification images have lower quality, such as blur, low resolution,
+JPEG compression, brightness shift, or noise.
+
+Evaluate one checkpoint:
+
+```bash
+python eval_degraded_phase2.py \
+  --checkpoint "$OUT/phase2_loss/r18_adaface/best.pth" \
+  --backbone r18 \
+  --data-dir "$DATA_DIR" \
+  --output "$OUT/degraded_eval/r18_adaface" \
+  --targets lfw,cfp_fp,agedb_30 \
+  --degradations clean,blur,lowres,jpeg,brightness,noise \
+  --batch-size 128 \
+  --fp16
+```
+
+Evaluate all Phase 2 losses in the recommended order:
+
+```bash
+python eval_degraded_phase2.py \
+  --checkpoint-dir "$OUT/phase2_loss" \
+  --backbone r18 \
+  --data-dir "$DATA_DIR" \
+  --output "$OUT/degraded_eval" \
+  --targets lfw,cfp_fp,agedb_30 \
+  --degradations clean,blur,lowres,jpeg,brightness,noise \
+  --batch-size 128 \
+  --fp16
+```
+
+The script writes:
+
+```text
+$OUT/degraded_eval/degraded_metrics.csv
+$OUT/degraded_eval/degraded_metrics.json
+$OUT/degraded_eval/degraded_summary.csv
+```
+
+For `--checkpoint-dir`, it evaluates:
+
+```text
+arcface -> adaface -> curricularface -> proposed -> magface -> elasticface -> cosface
+```
+
+For each loss folder, `best.pth` is used first. If it is missing, the script
+falls back to `latest.pt`.
 
 ## 13. Changing code during experiments
 
