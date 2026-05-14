@@ -10,6 +10,12 @@
 # It evaluates only on .bin files under:
 # ``/kaggle/input/CASIA-WebFace/eval``
 
+# %% [markdown]
+# ## Cell 1: Clone Repo And Install Dependencies
+#
+# Pull the repo into `/kaggle/working`, switch into `arcface_torch`, and install
+# only the runtime packages needed by the training/eval scripts.
+
 # %%
 from pathlib import Path
 import json
@@ -18,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import warnings
+import zipfile
 
 REPO_URL = "https://github.com/Tai12345-Ai/Lightweight_Face_Recognition.git"
 BRANCH = "main"
@@ -27,6 +34,7 @@ ARCFACE_DIR = CODE_ROOT / "insightface" / "recognition" / "arcface_torch"
 
 TRAIN_DATA_DIR = Path("/kaggle/input/CASIA-WebFace/casia-webface")
 EVAL_DIR = Path("/kaggle/input/CASIA-WebFace/eval")
+PRETRAINED_BACKBONE = Path("/kaggle/input/backbone/backbone.pth")
 OUTPUT_ROOT = Path("/kaggle/working/experiments")
 
 EVAL_TARGETS = [
@@ -68,7 +76,12 @@ run([
 ])
 
 # %% [markdown]
-# ## Check Inputs
+# ## Cell 2: Check Inputs
+#
+# Use the expected Kaggle inputs:
+# `/kaggle/input/CASIA-WebFace/{casia-webface,eval}` and
+# `/kaggle/input/backbone/backbone.pth`. The script refuses ambiguous `.pth`
+# selection if the expected backbone path is missing.
 
 # %%
 if not TRAIN_DATA_DIR.exists():
@@ -87,29 +100,42 @@ if not EVAL_DIR.exists():
 missing_eval = [name for name in EVAL_TARGETS if not (EVAL_DIR / f"{name}.bin").exists()]
 assert not missing_eval, f"Missing eval bins in {EVAL_DIR}: {missing_eval}"
 
-backbone_candidates = sorted(Path("/kaggle/input").rglob("backbone.pth"))
-if backbone_candidates:
-    if len(backbone_candidates) > 1:
+if not PRETRAINED_BACKBONE.exists():
+    backbone_candidates = sorted(Path("/kaggle/input").rglob("backbone.pth"))
+    if backbone_candidates:
+        if len(backbone_candidates) > 1:
+            warnings.warn(
+                "Expected /kaggle/input/backbone/backbone.pth, but found multiple "
+                "backbone.pth files. Using the first sorted candidate:\n"
+                + "\n".join(str(p) for p in backbone_candidates),
+                RuntimeWarning,
+            )
+        PRETRAINED_BACKBONE = backbone_candidates[0]
+    else:
+        pth_candidates = sorted(Path("/kaggle/input").rglob("*.pth"))
+        assert pth_candidates, "No pretrained backbone .pth found under /kaggle/input"
+        if len(pth_candidates) > 1:
+            raise RuntimeError(
+                "Expected /kaggle/input/backbone/backbone.pth, but it was not found. "
+                "Multiple .pth files exist, so refusing to choose one silently. "
+                "Candidates:\n" + "\n".join(str(p) for p in pth_candidates)
+            )
         warnings.warn(
-            "Multiple backbone.pth files found. Using the first sorted candidate:\n"
-            + "\n".join(str(p) for p in backbone_candidates),
+            "Expected /kaggle/input/backbone/backbone.pth, but it was not found. "
+            f"Using the only .pth candidate: {pth_candidates[0]}",
             RuntimeWarning,
         )
-    PRETRAINED_BACKBONE = backbone_candidates[0]
+        PRETRAINED_BACKBONE = pth_candidates[0]
 else:
+    print("Using expected backbone:", PRETRAINED_BACKBONE)
+
+if not PRETRAINED_BACKBONE.exists():
     pth_candidates = sorted(Path("/kaggle/input").rglob("*.pth"))
-    assert pth_candidates, "No pretrained backbone .pth found under /kaggle/input"
-    if len(pth_candidates) > 1:
-        raise RuntimeError(
-            "No file named backbone.pth was found, and multiple .pth files exist. "
-            "Refusing to choose one silently. Candidates:\n"
-            + "\n".join(str(p) for p in pth_candidates)
-        )
-    warnings.warn(
-        f"No backbone.pth found. Using the only .pth candidate: {pth_candidates[0]}",
-        RuntimeWarning,
+    raise FileNotFoundError(
+        "Pretrained backbone checkpoint not found. Expected "
+        f"/kaggle/input/backbone/backbone.pth. Available .pth files:\n"
+        + "\n".join(str(p) for p in pth_candidates)
     )
-    PRETRAINED_BACKBONE = pth_candidates[0]
 
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -119,7 +145,42 @@ print("PRETRAINED_BACKBONE:", PRETRAINED_BACKBONE)
 print("OUTPUT_ROOT:", OUTPUT_ROOT)
 
 # %% [markdown]
-# ## Preflight
+# ## Cell 3: Restore Previous Sweep Outputs
+#
+# `Save & Run All` starts from a clean `/kaggle/working`. To resume across
+# Kaggle versions, add a previous version output as an input dataset. This cell
+# restores either `soft_gated_lambda_sweep.zip` or a `soft_gated_lambda_sweep`
+# folder from `/kaggle/input` back into `/kaggle/working/experiments`.
+
+# %%
+SWEEP_ROOT = OUTPUT_ROOT / "soft_gated_lambda_sweep"
+restored = False
+
+for zip_candidate in sorted(Path("/kaggle/input").rglob("soft_gated_lambda_sweep.zip")):
+    print("Restoring previous sweep zip:", zip_candidate)
+    with zipfile.ZipFile(zip_candidate, "r") as f:
+        f.extractall(OUTPUT_ROOT)
+    restored = True
+    break
+
+if not restored:
+    for folder_candidate in sorted(Path("/kaggle/input").rglob("soft_gated_lambda_sweep")):
+        if folder_candidate.is_dir():
+            print("Restoring previous sweep folder:", folder_candidate)
+            shutil.copytree(folder_candidate, SWEEP_ROOT, dirs_exist_ok=True)
+            restored = True
+            break
+
+if restored:
+    print("Restored previous sweep outputs to:", SWEEP_ROOT)
+else:
+    print("No previous sweep output input found. Starting from pretrained backbone.")
+
+# %% [markdown]
+# ## Cell 4: Preflight
+#
+# Compile the soft-gated loss, standalone train script, and reused Phase 2
+# helpers before launching long Kaggle jobs.
 
 # %%
 run([
@@ -134,7 +195,10 @@ run([
 ], cwd=ARCFACE_DIR)
 
 # %% [markdown]
-# ## Lambda Sweep
+# ## Cell 5: Lambda Sweep
+#
+# Train `soft_gated_ada_curricular` for fixed lambda values. Each lambda has
+# its own output folder and resumes from `latest.pt` if present.
 
 # %%
 BACKBONE = "r18"
@@ -144,7 +208,7 @@ LR = 0.01
 WARMUP_EPOCHS = 1.0
 EVAL_EVERY = 2
 SAVE_EVERY_STEPS = 300
-MAX_TRAIN_MINUTES = 600
+MAX_TRAIN_MINUTES = 480
 NUM_WORKERS = 2
 USE_FP16 = True
 
@@ -245,7 +309,10 @@ for lambda_gate in LAMBDA_SWEEP:
 print("Done. Lambda sweep:", LAMBDA_SWEEP)
 
 # %% [markdown]
-# ## Progress
+# ## Cell 6: Progress
+#
+# Print epoch count, latest checkpoint, best checkpoint, and best score for
+# each lambda experiment.
 
 # %%
 root = OUTPUT_ROOT / "soft_gated_lambda_sweep"
@@ -276,7 +343,10 @@ else:
         print("  best_score:", best_score)
 
 # %% [markdown]
-# ## Backup
+# ## Cell 7: Backup
+#
+# Zip the sweep outputs so they can be downloaded or saved as a Kaggle version
+# artifact. The cell also displays a direct notebook download link for the zip.
 
 # %%
 zip_base = "/kaggle/working/soft_gated_lambda_sweep"
@@ -289,5 +359,13 @@ if root.exists():
     shutil.make_archive(zip_base, "zip", str(OUTPUT_ROOT), "soft_gated_lambda_sweep")
     print("Saved:", zip_path)
     print("Size MB:", zip_path.stat().st_size / 1024 / 1024)
+    try:
+        from IPython.display import FileLink, display
+
+        print("Download:")
+        display(FileLink(str(zip_path)))
+    except Exception as exc:
+        print("Could not render notebook download link:", exc)
+        print("Download path:", zip_path)
 else:
     print("No sweep outputs yet:", root)
