@@ -54,6 +54,16 @@ def run(cmd, cwd=None, check=True):
     return subprocess.run([str(x) for x in cmd], cwd=cwd, check=check)
 
 
+def normalize_train_data_dir(path):
+    path = Path(path)
+    nested_train = path / "casia-webface"
+    nested_eval = path / "eval"
+    if nested_train.is_dir() and nested_eval.is_dir():
+        print("Detected nested CASIA-WebFace layout. Using train folder:", nested_train)
+        return nested_train
+    return path
+
+
 if not CODE_ROOT.exists():
     run(["git", "clone", "--branch", BRANCH, REPO_URL, str(CODE_ROOT)])
 else:
@@ -88,6 +98,7 @@ if not TRAIN_DATA_DIR.exists():
     candidates = [p for p in Path("/kaggle/input").rglob("casia-webface") if p.is_dir()]
     assert candidates, f"TRAIN_DATA_DIR not found: {TRAIN_DATA_DIR}"
     TRAIN_DATA_DIR = candidates[0]
+TRAIN_DATA_DIR = normalize_train_data_dir(TRAIN_DATA_DIR)
 
 if not EVAL_DIR.exists():
     candidates = [
