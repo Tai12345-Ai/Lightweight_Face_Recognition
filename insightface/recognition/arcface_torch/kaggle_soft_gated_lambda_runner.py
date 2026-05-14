@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 
 REPO_URL = "https://github.com/Tai12345-Ai/Lightweight_Face_Recognition.git"
 BRANCH = "main"
@@ -87,10 +88,28 @@ missing_eval = [name for name in EVAL_TARGETS if not (EVAL_DIR / f"{name}.bin").
 assert not missing_eval, f"Missing eval bins in {EVAL_DIR}: {missing_eval}"
 
 backbone_candidates = sorted(Path("/kaggle/input").rglob("backbone.pth"))
-if not backbone_candidates:
-    backbone_candidates = sorted(Path("/kaggle/input").rglob("*.pth"))
-assert backbone_candidates, "No pretrained backbone .pth found under /kaggle/input"
-PRETRAINED_BACKBONE = backbone_candidates[0]
+if backbone_candidates:
+    if len(backbone_candidates) > 1:
+        warnings.warn(
+            "Multiple backbone.pth files found. Using the first sorted candidate:\n"
+            + "\n".join(str(p) for p in backbone_candidates),
+            RuntimeWarning,
+        )
+    PRETRAINED_BACKBONE = backbone_candidates[0]
+else:
+    pth_candidates = sorted(Path("/kaggle/input").rglob("*.pth"))
+    assert pth_candidates, "No pretrained backbone .pth found under /kaggle/input"
+    if len(pth_candidates) > 1:
+        raise RuntimeError(
+            "No file named backbone.pth was found, and multiple .pth files exist. "
+            "Refusing to choose one silently. Candidates:\n"
+            + "\n".join(str(p) for p in pth_candidates)
+        )
+    warnings.warn(
+        f"No backbone.pth found. Using the only .pth candidate: {pth_candidates[0]}",
+        RuntimeWarning,
+    )
+    PRETRAINED_BACKBONE = pth_candidates[0]
 
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 

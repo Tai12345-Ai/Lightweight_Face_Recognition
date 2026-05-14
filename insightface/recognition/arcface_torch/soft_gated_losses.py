@@ -5,7 +5,6 @@ Use it through ``train_soft_gated_lambda_kaggle.py`` while sweeping
 ``lambda_gate`` before promoting the loss into the main Phase 2 pipeline.
 """
 
-import math
 from typing import Tuple
 
 import torch
@@ -66,6 +65,7 @@ class SoftGatedAdaCurricularFaceLoss(nn.Module):
         self.t_alpha = t_alpha
         self.curriculum_alpha = curriculum_alpha
         self.eps = eps
+        self.last_stats = {}
         self.register_buffer("batch_mean", torch.ones(1) * 20.0)
         self.register_buffer("batch_std", torch.ones(1) * 100.0)
         self.register_buffer("t", torch.zeros(1))
@@ -94,6 +94,7 @@ class SoftGatedAdaCurricularFaceLoss(nn.Module):
         index, target = _positive_indices(labels)
         logits = logits.clone()
         if index.numel() == 0:
+            self.last_stats = {}
             return logits * self.s
 
         rows = logits[index].clone()
@@ -103,13 +104,9 @@ class SoftGatedAdaCurricularFaceLoss(nn.Module):
         )
         theta_y = target_cos.acos()
 
-        u_pos = torch.cos(
-            (theta_y - self.m * q).clamp(self.eps, math.pi - self.eps)
-        )
+        u_pos = torch.cos(theta_y - self.m * q)
         u_pos = (u_pos - (self.m * q + self.m)).to(dtype=rows.dtype)
-        arc_anchor = torch.cos(
-            (theta_y + self.m).clamp(self.eps, math.pi - self.eps)
-        ).to(dtype=rows.dtype)
+        arc_anchor = torch.cos(theta_y + self.m).to(dtype=rows.dtype)
         tau = (1.0 - self.lambda_gate) * arc_anchor + self.lambda_gate * u_pos
 
         with torch.no_grad():
@@ -120,6 +117,21 @@ class SoftGatedAdaCurricularFaceLoss(nn.Module):
         one_hot = torch.zeros_like(rows, dtype=torch.bool)
         one_hot.scatter_(1, target.view(-1, 1), True)
         hard_mask = (rows > tau.detach().view(-1, 1)) & (~one_hot)
+        total_negatives = (~one_hot).sum().clamp_min(1)
+        hard_negative_ratio = hard_mask.sum().float() / total_negatives.float()
+        with torch.no_grad():
+            q_float = q.detach().float()
+            self.last_stats = {
+                "q_mean": float(q_float.mean().item()),
+                "q_std": float(q_float.std(unbiased=False).item()),
+                "q_min": float(q_float.min().item()),
+                "q_max": float(q_float.max().item()),
+                "u_pos_mean": float(u_pos.detach().float().mean().item()),
+                "arc_anchor_mean": float(arc_anchor.detach().float().mean().item()),
+                "tau_mean": float(tau.detach().float().mean().item()),
+                "hard_negative_ratio": float(hard_negative_ratio.item()),
+                "curricular_t": float(self.t.detach().item()),
+            }
         t = self.t.to(dtype=rows.dtype)
         rows = torch.where(hard_mask, rows * (t + rows), rows).to(dtype=rows.dtype)
         rows.scatter_(1, target.view(-1, 1), u_pos.view(-1, 1))

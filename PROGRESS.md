@@ -50,3 +50,6 @@ Dung template nay khi thu mot cau hinh moi.
 
 **Viec can lam tiep**
 - 
+**gitTrain Phase 2 voi 2 proposed**
+- CurricularFace + AdaFace
+- ElasticFace + AdaFace

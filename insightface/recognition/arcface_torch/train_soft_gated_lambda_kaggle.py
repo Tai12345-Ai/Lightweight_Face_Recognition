@@ -40,6 +40,22 @@ from train_phase2_kaggle import (
 )
 
 
+HQ_EVAL_TARGETS = ("lfw", "cfp_ff", "cfp_fp", "agedb_30", "calfw", "cplfw")
+LQ_EVAL_TARGETS = ("sllfw", "talfw")
+ALL_EVAL_TARGETS = HQ_EVAL_TARGETS + LQ_EVAL_TARGETS
+LOSS_STAT_KEYS = (
+    "q_mean",
+    "q_std",
+    "q_min",
+    "q_max",
+    "u_pos_mean",
+    "arc_anchor_mean",
+    "tau_mean",
+    "hard_negative_ratio",
+    "curricular_t",
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Soft-Gated Ada-CurricularFace lambda sweep trainer"
@@ -156,6 +172,55 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     config["loss_name"] = args.loss
     config["eval_dir"] = str(args.eval_dir) if args.eval_dir else None
     return config
+
+
+def _complete_accuracy_mean(eval_metrics: Dict, targets) -> Optional[float]:
+    values = []
+    for target in targets:
+        item = eval_metrics.get(target)
+        if item is None or "accuracy" not in item:
+            return None
+        values.append(float(item["accuracy"]))
+    return float(np.mean(values)) if values else None
+
+
+def compute_group_eval(eval_metrics: Dict) -> Dict[str, float]:
+    group_metrics = {}
+    if not eval_metrics:
+        return group_metrics
+
+    hq_avg = _complete_accuracy_mean(eval_metrics, HQ_EVAL_TARGETS)
+    lq_avg = _complete_accuracy_mean(eval_metrics, LQ_EVAL_TARGETS)
+    all_avg = _complete_accuracy_mean(eval_metrics, ALL_EVAL_TARGETS)
+
+    if hq_avg is not None:
+        group_metrics["HQ_Avg"] = hq_avg
+    if lq_avg is not None:
+        group_metrics["LQ_Avg"] = lq_avg
+    if hq_avg is not None and lq_avg is not None:
+        group_metrics["HLQ_Avg"] = float(np.mean([hq_avg, lq_avg]))
+    if all_avg is not None:
+        group_metrics["All_Avg"] = all_avg
+
+    return group_metrics
+
+
+def select_eval_score(eval_metrics: Dict, group_metrics: Dict[str, float]):
+    if "HLQ_Avg" in group_metrics:
+        return group_metrics["HLQ_Avg"], "HLQ_Avg"
+    if "All_Avg" in group_metrics:
+        return group_metrics["All_Avg"], "All_Avg"
+    if eval_metrics:
+        values = [float(item["accuracy"]) for item in eval_metrics.values()]
+        return float(np.mean(values)), "mean_validation_accuracy"
+    return None, None
+
+
+def add_loss_stats(row: Dict, loss_stats: Dict) -> Dict:
+    for key in LOSS_STAT_KEYS:
+        if key in loss_stats:
+            row[key] = loss_stats[key]
+    return row
 
 
 def _same_float(a, b, tol=1e-9):
@@ -397,6 +462,7 @@ def main():
             loss_sum = 0.0
             norm_sum = 0.0
             sample_count = 0
+        last_loss_stats = {}
 
         for iteration, (images, labels) in enumerate(train_loader, start=1):
             if iteration <= skip_until_iteration:
@@ -415,6 +481,8 @@ def main():
                 else:
                     embeddings = backbone(images)
                 loss, _, norms = head(embeddings, labels)
+                loss_stats = getattr(margin_loss, "last_stats", {}) or {}
+                last_loss_stats = dict(loss_stats)
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -449,6 +517,7 @@ def main():
                     "lambda_gate": args.lambda_gate,
                     "elapsed_sec": int(time.time() - epoch_start),
                 }
+                add_loss_stats(row, last_loss_stats)
                 append_csv(exp_dir / "train_log.csv", row)
                 logging.info(
                     "epoch=%d/%d iter=%d/%d step=%d loss=%.4f lr=%.6g",
@@ -500,16 +569,17 @@ def main():
         epoch_loss = loss_sum / max(1, sample_count)
         epoch_norm = norm_sum / max(1, sample_count)
         eval_metrics = {}
+        group_metrics = {}
         should_eval = args.eval_every > 0 and ((epoch + 1) % args.eval_every == 0)
         if should_eval:
             backbone.eval()
             eval_metrics = evaluate_if_available(
                 backbone, eval_dir, val_targets, device, args.batch_size
             )
+            group_metrics = compute_group_eval(eval_metrics)
 
         if eval_metrics:
-            score = float(np.mean([item["accuracy"] for item in eval_metrics.values()]))
-            best_metric = "mean_validation_accuracy"
+            score, best_metric = select_eval_score(eval_metrics, group_metrics)
         else:
             score = -float(epoch_loss)
             best_metric = "negative_train_loss"
@@ -528,24 +598,27 @@ def main():
             "lambda_gate": float(args.lambda_gate),
             "elapsed_sec": int(time.time() - epoch_start),
             "eval": eval_metrics,
+            "group_eval": group_metrics,
         }
         metrics["epochs"].append(epoch_record)
         write_json(exp_dir / "metrics.json", metrics)
 
+        epoch_row = {
+            "event": "epoch",
+            "epoch": epoch + 1,
+            "iteration": 0,
+            "global_step": global_step,
+            "lr": optimizer.param_groups[0]["lr"],
+            "loss": "",
+            "epoch_loss": epoch_loss,
+            "mean_norm": epoch_norm,
+            "lambda_gate": args.lambda_gate,
+            "elapsed_sec": epoch_record["elapsed_sec"],
+        }
+        add_loss_stats(epoch_row, last_loss_stats)
         append_csv(
             exp_dir / "train_log.csv",
-            {
-                "event": "epoch",
-                "epoch": epoch + 1,
-                "iteration": 0,
-                "global_step": global_step,
-                "lr": optimizer.param_groups[0]["lr"],
-                "loss": "",
-                "epoch_loss": epoch_loss,
-                "mean_norm": epoch_norm,
-                "lambda_gate": args.lambda_gate,
-                "elapsed_sec": epoch_record["elapsed_sec"],
-            },
+            epoch_row,
         )
 
         checkpoint = make_checkpoint(
