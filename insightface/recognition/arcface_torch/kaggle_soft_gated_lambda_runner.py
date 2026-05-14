@@ -64,6 +64,24 @@ def normalize_train_data_dir(path):
     return path
 
 
+def detect_num_classes(train_dir, default=10572):
+    property_path = Path(train_dir) / "property"
+    if property_path.exists():
+        content = property_path.read_text(encoding="utf-8").strip()
+        try:
+            num_classes = int(content.split(",")[0].strip())
+            print("Detected num_classes from property:", num_classes)
+            return num_classes
+        except Exception as exc:
+            warnings.warn(
+                f"Could not parse {property_path}: {content!r} ({exc}). "
+                f"Using default NUM_CLASSES={default}.",
+                RuntimeWarning,
+            )
+    print("Using default NUM_CLASSES:", default)
+    return default
+
+
 if not CODE_ROOT.exists():
     run(["git", "clone", "--branch", BRANCH, REPO_URL, str(CODE_ROOT)])
 else:
@@ -99,6 +117,7 @@ if not TRAIN_DATA_DIR.exists():
     assert candidates, f"TRAIN_DATA_DIR not found: {TRAIN_DATA_DIR}"
     TRAIN_DATA_DIR = candidates[0]
 TRAIN_DATA_DIR = normalize_train_data_dir(TRAIN_DATA_DIR)
+NUM_CLASSES = detect_num_classes(TRAIN_DATA_DIR)
 
 if not EVAL_DIR.exists():
     candidates = [
@@ -154,6 +173,7 @@ print("TRAIN_DATA_DIR:", TRAIN_DATA_DIR)
 print("EVAL_DIR:", EVAL_DIR)
 print("PRETRAINED_BACKBONE:", PRETRAINED_BACKBONE)
 print("OUTPUT_ROOT:", OUTPUT_ROOT)
+print("NUM_CLASSES:", NUM_CLASSES)
 
 # %% [markdown]
 # ## Cell 3: Restore Previous Sweep Outputs
@@ -204,6 +224,31 @@ run([
     "eval_degraded_phase2.py",
     "recordio_fallback.py",
 ], cwd=ARCFACE_DIR)
+
+import torch
+
+if torch.cuda.is_available():
+    gpu_name = torch.cuda.get_device_name(0)
+    gpu_capability = torch.cuda.get_device_capability(0)
+    gpu_arch = f"sm_{gpu_capability[0]}{gpu_capability[1]}"
+    supported_arches = torch.cuda.get_arch_list()
+    print("GPU:", gpu_name, "capability:", gpu_capability)
+    print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda)
+    print("PyTorch CUDA arch list:", supported_arches)
+    if "T4" not in gpu_name:
+        raise RuntimeError(
+            f"This runner is configured for Kaggle T4. Current GPU is {gpu_name}. "
+            "Go to Notebook Settings -> Accelerator and select GPU T4, then restart and rerun."
+        )
+    if supported_arches and gpu_arch not in supported_arches:
+        raise RuntimeError(
+            f"GPU {gpu_name} has CUDA capability {gpu_arch}, but this PyTorch build "
+            f"only supports {supported_arches}. Select Kaggle T4 or another compatible GPU."
+        )
+else:
+    raise RuntimeError(
+        "CUDA is not available. Go to Notebook Settings -> Accelerator and select GPU T4."
+    )
 
 # %% [markdown]
 # ## Cell 5: Lambda Sweep
@@ -298,6 +343,8 @@ for lambda_gate in LAMBDA_SWEEP:
         str(MAX_TRAIN_MINUTES),
         "--num_workers",
         str(NUM_WORKERS),
+        "--num_classes",
+        str(NUM_CLASSES),
         "--eval_targets",
         ",".join(EVAL_TARGETS),
     ]
