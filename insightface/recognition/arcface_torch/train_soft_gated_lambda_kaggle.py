@@ -174,6 +174,19 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     return config
 
 
+def normalize_train_data_dir(path) -> str:
+    path = Path(path)
+    nested_train = path / "casia-webface"
+    nested_eval = path / "eval"
+    if nested_train.is_dir() and nested_eval.is_dir():
+        logging.info(
+            "Detected nested CASIA-WebFace layout. Using train folder: %s",
+            nested_train,
+        )
+        return str(nested_train)
+    return str(path)
+
+
 def _complete_accuracy_mean(eval_metrics: Dict, targets) -> Optional[float]:
     values = []
     for target in targets:
@@ -220,6 +233,12 @@ def add_loss_stats(row: Dict, loss_stats: Dict) -> Dict:
     for key in LOSS_STAT_KEYS:
         if key in loss_stats:
             row[key] = loss_stats[key]
+    return row
+
+
+def add_group_metrics(row: Dict, group_metrics: Dict[str, float]) -> Dict:
+    for key in ("HQ_Avg", "LQ_Avg", "HLQ_Avg", "All_Avg"):
+        row[key] = group_metrics.get(key, "")
     return row
 
 
@@ -316,6 +335,7 @@ def main():
 
     exp_dir = experiment_dir(args)
     setup_logging(exp_dir)
+    args.data_dir = normalize_train_data_dir(args.data_dir)
     config = json_safe_config(args, exp_dir)
     write_json(exp_dir / "config.json", config)
 
@@ -577,6 +597,14 @@ def main():
                 backbone, eval_dir, val_targets, device, args.batch_size
             )
             group_metrics = compute_group_eval(eval_metrics)
+            if group_metrics:
+                logging.info(
+                    "group_eval HQ_Avg=%s LQ_Avg=%s HLQ_Avg=%s All_Avg=%s",
+                    f"{group_metrics['HQ_Avg']:.5f}" if "HQ_Avg" in group_metrics else "NA",
+                    f"{group_metrics['LQ_Avg']:.5f}" if "LQ_Avg" in group_metrics else "NA",
+                    f"{group_metrics['HLQ_Avg']:.5f}" if "HLQ_Avg" in group_metrics else "NA",
+                    f"{group_metrics['All_Avg']:.5f}" if "All_Avg" in group_metrics else "NA",
+                )
 
         if eval_metrics:
             score, best_metric = select_eval_score(eval_metrics, group_metrics)
@@ -615,6 +643,7 @@ def main():
             "lambda_gate": args.lambda_gate,
             "elapsed_sec": epoch_record["elapsed_sec"],
         }
+        add_group_metrics(epoch_row, group_metrics)
         add_loss_stats(epoch_row, last_loss_stats)
         append_csv(
             exp_dir / "train_log.csv",
