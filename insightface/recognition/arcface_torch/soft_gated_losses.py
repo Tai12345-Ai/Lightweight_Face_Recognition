@@ -111,7 +111,7 @@ class SoftGatedAdaCurricularFaceLoss(nn.Module):
 
         with torch.no_grad():
             self.t.mul_(self.curriculum_alpha).add_(
-                target_cos.detach().mean() * (1.0 - self.curriculum_alpha)
+                arc_anchor.detach().mean() * (1.0 - self.curriculum_alpha)
             )
 
         one_hot = torch.zeros_like(rows, dtype=torch.bool)
