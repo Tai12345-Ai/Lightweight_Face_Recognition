@@ -64,7 +64,7 @@ def normalize_train_data_dir(path):
     return path
 
 
-def detect_num_classes(train_dir, default=10572):
+def detect_num_classes(train_dir, default=10575):
     property_path = Path(train_dir) / "property"
     if property_path.exists():
         content = property_path.read_text(encoding="utf-8").strip()
@@ -226,29 +226,24 @@ run([
 ], cwd=ARCFACE_DIR)
 
 import torch
+from backbones import get_model
+from train_phase2_kaggle import torch_load_cpu, extract_backbone_state, build_dataset
 
-if torch.cuda.is_available():
-    gpu_name = torch.cuda.get_device_name(0)
-    gpu_capability = torch.cuda.get_device_capability(0)
-    gpu_arch = f"sm_{gpu_capability[0]}{gpu_capability[1]}"
-    supported_arches = torch.cuda.get_arch_list()
-    print("GPU:", gpu_name, "capability:", gpu_capability)
-    print("PyTorch:", torch.__version__, "CUDA:", torch.version.cuda)
-    print("PyTorch CUDA arch list:", supported_arches)
-    if "T4" not in gpu_name:
-        raise RuntimeError(
-            f"This runner is configured for Kaggle T4. Current GPU is {gpu_name}. "
-            "Go to Notebook Settings -> Accelerator and select GPU T4, then restart and rerun."
-        )
-    if supported_arches and gpu_arch not in supported_arches:
-        raise RuntimeError(
-            f"GPU {gpu_name} has CUDA capability {gpu_arch}, but this PyTorch build "
-            f"only supports {supported_arches}. Select Kaggle T4 or another compatible GPU."
-        )
-else:
-    raise RuntimeError(
-        "CUDA is not available. Go to Notebook Settings -> Accelerator and select GPU T4."
-    )
+NUM_CLASSES = 10575
+
+print("TRAIN_DATA_DIR:", TRAIN_DATA_DIR)
+print("EVAL_DIR:", EVAL_DIR)
+print("PRETRAINED_BACKBONE:", PRETRAINED_BACKBONE)
+print("EVAL_TARGETS:", ",".join(EVAL_TARGETS))
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device:", device)
+if device == "cuda":
+    print("GPU:", torch.cuda.get_device_name(0))
+
+assert device == "cuda", "CUDA/GPU is required"
+assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
+assert PRETRAINED_BACKBONE.exists(), f"Missing backbone: {PRETRAINED_BACKBONE}"
 
 # %% [markdown]
 # ## Cell 5: Lambda Sweep
@@ -262,8 +257,9 @@ EPOCHS = 20
 BATCH_SIZE = 128
 LR = 0.01
 WARMUP_EPOCHS = 1.0
-EVAL_EVERY = 2
+EVAL_EVERY = 1
 SAVE_EVERY_STEPS = 300
+SAVE_EVERY_EPOCHS = 1
 MAX_TRAIN_MINUTES = 480
 NUM_WORKERS = 2
 USE_FP16 = True
@@ -271,7 +267,7 @@ USE_FP16 = True
 S = 64.0
 M = 0.4
 H = 0.333
-LAMBDA_SWEEP = [0.0, 0.2, 0.4, 0.5]
+LAMBDA_SWEEP = [0.5, 0.4, 0.2, 0.0]
 
 
 def lambda_tag(value):
@@ -297,6 +293,10 @@ def is_complete(lambda_gate):
         metrics = json.load(f)
     return len(metrics.get("epochs", [])) >= EPOCHS
 
+
+print("Cell 5 NUM_CLASSES:", NUM_CLASSES)
+assert NUM_CLASSES < 100000, f"Bad NUM_CLASSES={NUM_CLASSES}"
+assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
 
 for lambda_gate in LAMBDA_SWEEP:
     if is_complete(lambda_gate):
@@ -336,7 +336,7 @@ for lambda_gate in LAMBDA_SWEEP:
         "--eval_every",
         str(EVAL_EVERY),
         "--save_every",
-        "1",
+        str(SAVE_EVERY_EPOCHS),
         "--save_every_steps",
         str(SAVE_EVERY_STEPS),
         "--max_train_minutes",
