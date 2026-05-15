@@ -166,6 +166,11 @@ def parse_args():
     parser.add_argument("--backbone", default="r18", choices=["r18"])
     parser.add_argument("--pretrained-backbone", default=None)
     parser.add_argument("--data-dir", required=True)
+    parser.add_argument(
+        "--eval-dir",
+        default=None,
+        help="Directory containing verification .bin files. Defaults to --data-dir.",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -267,6 +272,7 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     config = vars(args).copy()
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
+    config["eval_dir"] = str(args.eval_dir) if args.eval_dir else None
     config["effective_backbone_lr"] = float(args.backbone_lr)
     config["effective_head_lr"] = float(args.head_lr)
     return config
@@ -734,6 +740,7 @@ def main():
         "epochs": [],
     }
     val_targets = [item.strip() for item in args.val_targets.split(",") if item.strip()]
+    eval_dir = args.eval_dir or args.data_dir
 
     logging.info("Experiment dir: %s", exp_dir)
     logging.info(
@@ -750,6 +757,8 @@ def main():
         args.backbone_lr,
         args.head_lr,
     )
+    logging.info("train_data=%s", args.data_dir)
+    logging.info("eval_dir=%s eval_targets=%s", eval_dir, ",".join(val_targets))
     logging.info(
         "steps_per_epoch=%d save_every_steps=%d max_train_minutes=%.1f",
         steps_per_epoch,
@@ -917,7 +926,7 @@ def main():
         if should_eval:
             backbone.eval()
             eval_metrics = evaluate_if_available(
-                backbone, args.data_dir, val_targets, device, args.batch_size
+                backbone, eval_dir, val_targets, device, args.batch_size
             )
 
         if eval_metrics:
