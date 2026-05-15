@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import warnings
 import zipfile
 
@@ -256,11 +257,14 @@ BACKBONE = "r18"
 EPOCHS = 20
 BATCH_SIZE = 128
 LR = 0.01
+BACKBONE_LR = 0.001
+HEAD_LR = 0.01
 WARMUP_EPOCHS = 1.0
 EVAL_EVERY = 1
 SAVE_EVERY_STEPS = 300
 SAVE_EVERY_EPOCHS = 1
 MAX_TRAIN_MINUTES = 480
+MIN_TRAIN_MINUTES_TO_START = 2
 NUM_WORKERS = 2
 USE_FP16 = True
 
@@ -268,6 +272,14 @@ S = 64.0
 M = 0.4
 H = 0.333
 LAMBDA_SWEEP = [0.5, 0.4, 0.2, 0.0]
+SWEEP_START_TIME = time.time()
+
+
+def remaining_train_minutes():
+    if MAX_TRAIN_MINUTES <= 0:
+        return MAX_TRAIN_MINUTES
+    elapsed_minutes = (time.time() - SWEEP_START_TIME) / 60.0
+    return max(0.0, MAX_TRAIN_MINUTES - elapsed_minutes)
 
 
 def lambda_tag(value):
@@ -277,11 +289,19 @@ def lambda_tag(value):
     return text.replace("-", "m").replace(".", "p")
 
 
+def float_tag(value):
+    text = f"{float(value):.6g}"
+    return text.replace("-", "m").replace(".", "p")
+
+
 def exp_dir(lambda_gate):
     return (
         OUTPUT_ROOT
         / "soft_gated_lambda_sweep"
-        / f"{BACKBONE}_soft_gated_ada_curricular_lambda_{lambda_tag(lambda_gate)}"
+        / (
+            f"{BACKBONE}_soft_gated_ada_curricular_lambda_{lambda_tag(lambda_gate)}"
+            f"_blr_{float_tag(BACKBONE_LR)}_hlr_{float_tag(HEAD_LR)}"
+        )
     )
 
 
@@ -302,6 +322,14 @@ for lambda_gate in LAMBDA_SWEEP:
     if is_complete(lambda_gate):
         print(f"[SKIP] lambda_gate={lambda_gate} complete.")
         continue
+
+    train_minutes_left = remaining_train_minutes()
+    if MAX_TRAIN_MINUTES > 0 and train_minutes_left < MIN_TRAIN_MINUTES_TO_START:
+        print(
+            f"[STOP] sweep time budget exhausted "
+            f"({train_minutes_left:.1f} minutes left). Resume next session."
+        )
+        break
 
     latest = exp_dir(lambda_gate) / "latest.pt"
     cmd = [
@@ -331,6 +359,10 @@ for lambda_gate in LAMBDA_SWEEP:
         str(BATCH_SIZE),
         "--lr",
         str(LR),
+        "--backbone_lr",
+        str(BACKBONE_LR),
+        "--head_lr",
+        str(HEAD_LR),
         "--warmup_epochs",
         str(WARMUP_EPOCHS),
         "--eval_every",
@@ -340,7 +372,7 @@ for lambda_gate in LAMBDA_SWEEP:
         "--save_every_steps",
         str(SAVE_EVERY_STEPS),
         "--max_train_minutes",
-        str(MAX_TRAIN_MINUTES),
+        f"{train_minutes_left:.2f}",
         "--num_workers",
         str(NUM_WORKERS),
         "--num_classes",
@@ -350,6 +382,11 @@ for lambda_gate in LAMBDA_SWEEP:
     ]
     if USE_FP16:
         cmd.append("--fp16")
+
+    print(
+        f"[BUDGET] lambda_gate={lambda_gate} "
+        f"remaining_sweep_train_minutes={train_minutes_left:.1f}"
+    )
 
     if latest.exists():
         print(f"[RESUME] lambda_gate={lambda_gate} from {latest}")
@@ -365,6 +402,7 @@ for lambda_gate in LAMBDA_SWEEP:
         break
 
 print("Done. Lambda sweep:", LAMBDA_SWEEP)
+print("Learning rates: backbone_lr=", BACKBONE_LR, "head_lr=", HEAD_LR)
 
 # %% [markdown]
 # ## Cell 6: Progress

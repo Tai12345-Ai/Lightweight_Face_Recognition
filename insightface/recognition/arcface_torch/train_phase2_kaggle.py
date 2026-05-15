@@ -171,6 +171,18 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument(
+        "--backbone-lr",
+        type=float,
+        default=None,
+        help="Learning rate for backbone parameters. Defaults to --lr.",
+    )
+    parser.add_argument(
+        "--head-lr",
+        type=float,
+        default=None,
+        help="Learning rate for classifier head parameters. Defaults to --lr.",
+    )
+    parser.add_argument(
         "--warmup-epochs",
         type=float,
         default=1.0,
@@ -218,7 +230,24 @@ def setup_seed(seed):
 
 
 def experiment_dir(args) -> Path:
-    return Path(args.output_dir) / "phase2_loss" / f"{args.backbone}_{args.loss}"
+    name = f"{args.backbone}_{args.loss}"
+    if getattr(args, "use_split_lr", False):
+        name += f"_blr_{float_tag(args.backbone_lr)}_hlr_{float_tag(args.head_lr)}"
+    return Path(args.output_dir) / "phase2_loss" / name
+
+
+def float_tag(value: float) -> str:
+    text = f"{float(value):.6g}"
+    return text.replace("-", "m").replace(".", "p")
+
+
+def configure_learning_rates(args):
+    args.use_split_lr = args.backbone_lr is not None or args.head_lr is not None
+    if args.backbone_lr is None:
+        args.backbone_lr = args.lr
+    if args.head_lr is None:
+        args.head_lr = args.lr
+    return args
 
 
 def setup_logging(exp_dir: Path):
@@ -238,6 +267,8 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     config = vars(args).copy()
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
+    config["effective_backbone_lr"] = float(args.backbone_lr)
+    config["effective_head_lr"] = float(args.head_lr)
     return config
 
 
@@ -389,6 +420,38 @@ def trainable_parameters(backbone, head, freeze_backbone):
         backbone.eval()
         return list(head.parameters())
     return list(backbone.parameters()) + list(head.parameters())
+
+
+def split_trainable_parameters(backbone, head, args):
+    if args.freeze_backbone:
+        for param in backbone.parameters():
+            param.requires_grad = False
+        backbone.eval()
+        head_params = list(head.parameters())
+        return [{"params": head_params, "lr": args.head_lr, "name": "head"}], head_params
+
+    backbone_params = list(backbone.parameters())
+    head_params = list(head.parameters())
+    optimizer_params = [
+        {"params": backbone_params, "lr": args.backbone_lr, "name": "backbone"},
+        {"params": head_params, "lr": args.head_lr, "name": "head"},
+    ]
+    return optimizer_params, backbone_params + head_params
+
+
+def current_learning_rates(optimizer):
+    values = {"backbone_lr": "", "head_lr": ""}
+    for index, group in enumerate(optimizer.param_groups):
+        name = group.get("name", f"group{index}")
+        if name == "backbone":
+            values["backbone_lr"] = group["lr"]
+        elif name == "head":
+            values["head_lr"] = group["lr"]
+        elif index == 0:
+            values["backbone_lr"] = group["lr"]
+    if values["head_lr"] == "" and optimizer.param_groups:
+        values["head_lr"] = optimizer.param_groups[-1]["lr"]
+    return values
 
 
 def build_scheduler(optimizer, total_steps, warmup_steps):
@@ -589,6 +652,7 @@ def evaluate_if_available(backbone, data_dir, val_targets, device, batch_size):
 
 def main():
     args = parse_args()
+    configure_learning_rates(args)
     setup_seed(args.seed)
 
     exp_dir = experiment_dir(args)
@@ -629,9 +693,9 @@ def main():
     if not args.resume:
         load_pretrained_backbone(backbone, args.pretrained_backbone)
 
-    params = trainable_parameters(backbone, head, args.freeze_backbone)
+    optimizer_params, params = split_trainable_parameters(backbone, head, args)
     optimizer = torch.optim.SGD(
-        params,
+        optimizer_params,
         lr=args.lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay,
@@ -673,13 +737,18 @@ def main():
 
     logging.info("Experiment dir: %s", exp_dir)
     logging.info(
-        "Training loss=%s backbone=%s classes=%d images=%d batch_size=%d lr=%g",
+        (
+            "Training loss=%s backbone=%s classes=%d images=%d batch_size=%d "
+            "base_lr=%g backbone_lr=%g head_lr=%g"
+        ),
         args.loss,
         args.backbone,
         num_classes,
         len(dataset),
         args.batch_size,
         args.lr,
+        args.backbone_lr,
+        args.head_lr,
     )
     logging.info(
         "steps_per_epoch=%d save_every_steps=%d max_train_minutes=%.1f",
@@ -765,12 +834,15 @@ def main():
             sample_count += batch_size
 
             if iteration % args.log_every == 0 or iteration == len(train_loader):
+                lr_values = current_learning_rates(optimizer)
                 row = {
                     "event": "iter",
                     "epoch": epoch + 1,
                     "iteration": iteration,
                     "global_step": global_step,
                     "lr": optimizer.param_groups[0]["lr"],
+                    "backbone_lr": lr_values["backbone_lr"],
+                    "head_lr": lr_values["head_lr"],
                     "loss": loss.item(),
                     "epoch_loss": "",
                     "mean_norm": norms.detach().mean().item(),
@@ -778,14 +850,26 @@ def main():
                 }
                 append_csv(exp_dir / "train_log.csv", row)
                 logging.info(
-                    "epoch=%d/%d iter=%d/%d step=%d loss=%.4f lr=%.6g",
+                    (
+                        "epoch=%d/%d iter=%d/%d step=%d loss=%.4f "
+                        "backbone_lr=%s head_lr=%s"
+                    ),
                     epoch + 1,
                     args.epochs,
                     iteration,
                     len(train_loader),
                     global_step,
                     loss.item(),
-                    optimizer.param_groups[0]["lr"],
+                    (
+                        f"{lr_values['backbone_lr']:.6g}"
+                        if lr_values["backbone_lr"] != ""
+                        else "NA"
+                    ),
+                    (
+                        f"{lr_values['head_lr']:.6g}"
+                        if lr_values["head_lr"] != ""
+                        else "NA"
+                    ),
                 )
 
             should_save_step = (
@@ -849,11 +933,14 @@ def main():
             metrics["best_epoch"] = epoch + 1
             metrics["best_metric"] = best_metric
 
+        lr_values = current_learning_rates(optimizer)
         epoch_record = {
             "epoch": epoch + 1,
             "loss": float(epoch_loss),
             "mean_norm": float(epoch_norm),
             "lr": float(optimizer.param_groups[0]["lr"]),
+            "backbone_lr": lr_values["backbone_lr"],
+            "head_lr": lr_values["head_lr"],
             "elapsed_sec": int(time.time() - epoch_start),
             "eval": eval_metrics,
         }
@@ -868,6 +955,8 @@ def main():
                 "iteration": 0,
                 "global_step": global_step,
                 "lr": optimizer.param_groups[0]["lr"],
+                "backbone_lr": lr_values["backbone_lr"],
+                "head_lr": lr_values["head_lr"],
                 "loss": "",
                 "epoch_loss": epoch_loss,
                 "mean_norm": epoch_norm,

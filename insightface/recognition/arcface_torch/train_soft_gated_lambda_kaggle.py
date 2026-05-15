@@ -26,7 +26,10 @@ from train_phase2_kaggle import (
     append_csv,
     build_dataset,
     build_scheduler,
+    configure_learning_rates,
+    current_learning_rates,
     evaluate_if_available,
+    float_tag,
     load_pretrained_backbone,
     make_checkpoint,
     make_grad_scaler,
@@ -34,8 +37,8 @@ from train_phase2_kaggle import (
     save_checkpoint,
     setup_logging,
     setup_seed,
+    split_trainable_parameters,
     torch_load_cpu,
-    trainable_parameters,
     write_json,
 )
 
@@ -98,6 +101,22 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", "--batch-size", dest="batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.01)
+    parser.add_argument(
+        "--backbone_lr",
+        "--backbone-lr",
+        dest="backbone_lr",
+        type=float,
+        default=None,
+        help="Learning rate for backbone parameters. Defaults to --lr.",
+    )
+    parser.add_argument(
+        "--head_lr",
+        "--head-lr",
+        dest="head_lr",
+        type=float,
+        default=None,
+        help="Learning rate for classifier head parameters. Defaults to --lr.",
+    )
     parser.add_argument("--warmup_epochs", "--warmup-epochs", dest="warmup_epochs", type=float, default=1.0)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--eval_every", "--eval-every", dest="eval_every", type=int, default=1)
@@ -159,10 +178,13 @@ def lambda_tag(value: float) -> str:
 
 
 def experiment_dir(args) -> Path:
+    name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
+    if getattr(args, "use_split_lr", False):
+        name += f"_blr_{float_tag(args.backbone_lr)}_hlr_{float_tag(args.head_lr)}"
     return (
         Path(args.output_dir)
         / "soft_gated_lambda_sweep"
-        / f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
+        / name
     )
 
 
@@ -171,6 +193,8 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
     config["eval_dir"] = str(args.eval_dir) if args.eval_dir else None
+    config["effective_backbone_lr"] = float(args.backbone_lr)
+    config["effective_head_lr"] = float(args.head_lr)
     return config
 
 
@@ -331,6 +355,7 @@ def load_checkpoint_if_requested(args, exp_dir, backbone, head, optimizer, sched
 
 def main():
     args = parse_args()
+    configure_learning_rates(args)
     setup_seed(args.seed)
 
     exp_dir = experiment_dir(args)
@@ -377,9 +402,9 @@ def main():
         fp16=use_amp,
     ).to(device)
 
-    params = trainable_parameters(backbone, head, args.freeze_backbone)
+    optimizer_params, params = split_trainable_parameters(backbone, head, args)
     optimizer = torch.optim.SGD(
-        params,
+        optimizer_params,
         lr=args.lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay,
@@ -427,7 +452,10 @@ def main():
 
     logging.info("Experiment dir: %s", exp_dir)
     logging.info(
-        "Training loss=%s lambda_gate=%.4f backbone=%s classes=%d images=%d batch_size=%d lr=%g",
+        (
+            "Training loss=%s lambda_gate=%.4f backbone=%s classes=%d images=%d "
+            "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
+        ),
         args.loss,
         args.lambda_gate,
         args.backbone,
@@ -435,6 +463,8 @@ def main():
         len(dataset),
         args.batch_size,
         args.lr,
+        args.backbone_lr,
+        args.head_lr,
     )
     logging.info("train_data=%s", args.data_dir)
     logging.info("eval_dir=%s eval_targets=%s", eval_dir, ",".join(val_targets))
@@ -525,12 +555,15 @@ def main():
             sample_count += batch_size
 
             if iteration % args.log_every == 0 or iteration == len(train_loader):
+                lr_values = current_learning_rates(optimizer)
                 row = {
                     "event": "iter",
                     "epoch": epoch + 1,
                     "iteration": iteration,
                     "global_step": global_step,
                     "lr": optimizer.param_groups[0]["lr"],
+                    "backbone_lr": lr_values["backbone_lr"],
+                    "head_lr": lr_values["head_lr"],
                     "loss": loss.item(),
                     "epoch_loss": "",
                     "mean_norm": norms.detach().mean().item(),
@@ -540,14 +573,26 @@ def main():
                 add_loss_stats(row, last_loss_stats)
                 append_csv(exp_dir / "train_log.csv", row)
                 logging.info(
-                    "epoch=%d/%d iter=%d/%d step=%d loss=%.4f lr=%.6g",
+                    (
+                        "epoch=%d/%d iter=%d/%d step=%d loss=%.4f "
+                        "backbone_lr=%s head_lr=%s"
+                    ),
                     epoch + 1,
                     args.epochs,
                     iteration,
                     len(train_loader),
                     global_step,
                     loss.item(),
-                    optimizer.param_groups[0]["lr"],
+                    (
+                        f"{lr_values['backbone_lr']:.6g}"
+                        if lr_values["backbone_lr"] != ""
+                        else "NA"
+                    ),
+                    (
+                        f"{lr_values['head_lr']:.6g}"
+                        if lr_values["head_lr"] != ""
+                        else "NA"
+                    ),
                 )
 
             should_save_step = (
@@ -618,11 +663,14 @@ def main():
             metrics["best_epoch"] = epoch + 1
             metrics["best_metric"] = best_metric
 
+        lr_values = current_learning_rates(optimizer)
         epoch_record = {
             "epoch": epoch + 1,
             "loss": float(epoch_loss),
             "mean_norm": float(epoch_norm),
             "lr": float(optimizer.param_groups[0]["lr"]),
+            "backbone_lr": lr_values["backbone_lr"],
+            "head_lr": lr_values["head_lr"],
             "lambda_gate": float(args.lambda_gate),
             "elapsed_sec": int(time.time() - epoch_start),
             "eval": eval_metrics,
@@ -637,6 +685,8 @@ def main():
             "iteration": 0,
             "global_step": global_step,
             "lr": optimizer.param_groups[0]["lr"],
+            "backbone_lr": lr_values["backbone_lr"],
+            "head_lr": lr_values["head_lr"],
             "loss": "",
             "epoch_loss": epoch_loss,
             "mean_norm": epoch_norm,
