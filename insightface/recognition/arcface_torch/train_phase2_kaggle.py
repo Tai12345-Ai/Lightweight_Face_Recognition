@@ -32,6 +32,13 @@ from losses_extended import available_phase2_losses, get_phase2_loss
 from recordio_fallback import MXIndexedRecordIOFallback, unpack_image_record
 
 
+# Paper-style high-quality average: LFW, CFP-FP, CPLFW, AgeDB, CALFW.
+HQ_EVAL_TARGETS = ("lfw", "cfp_fp", "cplfw", "agedb_30", "calfw")
+LQ_EVAL_TARGETS = ("sllfw", "talfw")
+EVAL7_TARGETS = HQ_EVAL_TARGETS + LQ_EVAL_TARGETS
+ALL_EVAL_TARGETS = EVAL7_TARGETS
+
+
 class SyntheticDataset(Dataset):
     def __init__(self, length=4096, num_classes=16, image_size=112):
         self.length = length
@@ -221,7 +228,7 @@ def parse_args():
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument(
         "--val-targets",
-        default="lfw,cfp_fp,agedb_30",
+        default="lfw,cfp_fp,cplfw,agedb_30,calfw,sllfw,talfw",
         help="Comma-separated verification .bin names under data-dir. Use empty string to disable.",
     )
     return parser.parse_args()
@@ -656,6 +663,55 @@ def evaluate_if_available(backbone, data_dir, val_targets, device, batch_size):
     return results
 
 
+def _complete_accuracy_mean(eval_metrics: Dict, targets) -> Optional[float]:
+    values = []
+    for target in targets:
+        item = eval_metrics.get(target)
+        if item is None or "accuracy" not in item:
+            return None
+        values.append(float(item["accuracy"]))
+    return float(np.mean(values)) if values else None
+
+
+def compute_group_eval(eval_metrics: Dict) -> Dict[str, float]:
+    group_metrics = {}
+    if not eval_metrics:
+        return group_metrics
+
+    hq_avg = _complete_accuracy_mean(eval_metrics, HQ_EVAL_TARGETS)
+    lq_avg = _complete_accuracy_mean(eval_metrics, LQ_EVAL_TARGETS)
+    eval7_avg = _complete_accuracy_mean(eval_metrics, EVAL7_TARGETS)
+    all_avg = _complete_accuracy_mean(eval_metrics, ALL_EVAL_TARGETS)
+
+    if hq_avg is not None:
+        group_metrics["HQ_Avg"] = hq_avg
+    if lq_avg is not None:
+        group_metrics["LQ_Avg"] = lq_avg
+    if eval7_avg is not None:
+        group_metrics["Eval7_Avg"] = eval7_avg
+    if all_avg is not None:
+        group_metrics["All_Avg"] = all_avg
+
+    return group_metrics
+
+
+def select_eval_score(eval_metrics: Dict, group_metrics: Dict[str, float]):
+    if "HQ_Avg" in group_metrics:
+        return group_metrics["HQ_Avg"], "HQ_Avg"
+    if "All_Avg" in group_metrics:
+        return group_metrics["All_Avg"], "All_Avg"
+    if eval_metrics:
+        values = [float(item["accuracy"]) for item in eval_metrics.values()]
+        return float(np.mean(values)), "mean_validation_accuracy"
+    return None, None
+
+
+def add_group_metrics(row: Dict, group_metrics: Dict[str, float]) -> Dict:
+    for key in ("HQ_Avg", "LQ_Avg", "Eval7_Avg", "All_Avg"):
+        row[key] = group_metrics.get(key, "")
+    return row
+
+
 def main():
     args = parse_args()
     configure_learning_rates(args)
@@ -922,16 +978,25 @@ def main():
         epoch_loss = loss_sum / max(1, sample_count)
         epoch_norm = norm_sum / max(1, sample_count)
         eval_metrics = {}
+        group_metrics = {}
         should_eval = args.eval_every > 0 and ((epoch + 1) % args.eval_every == 0)
         if should_eval:
             backbone.eval()
             eval_metrics = evaluate_if_available(
                 backbone, eval_dir, val_targets, device, args.batch_size
             )
+            group_metrics = compute_group_eval(eval_metrics)
+            if group_metrics:
+                logging.info(
+                    "group_eval HQ_Avg=%s LQ_Avg=%s Eval7_Avg=%s All_Avg=%s",
+                    f"{group_metrics['HQ_Avg']:.5f}" if "HQ_Avg" in group_metrics else "NA",
+                    f"{group_metrics['LQ_Avg']:.5f}" if "LQ_Avg" in group_metrics else "NA",
+                    f"{group_metrics['Eval7_Avg']:.5f}" if "Eval7_Avg" in group_metrics else "NA",
+                    f"{group_metrics['All_Avg']:.5f}" if "All_Avg" in group_metrics else "NA",
+                )
 
         if eval_metrics:
-            score = float(np.mean([item["accuracy"] for item in eval_metrics.values()]))
-            best_metric = "mean_validation_accuracy"
+            score, best_metric = select_eval_score(eval_metrics, group_metrics)
         else:
             score = -float(epoch_loss)
             best_metric = "negative_train_loss"
@@ -952,26 +1017,26 @@ def main():
             "head_lr": lr_values["head_lr"],
             "elapsed_sec": int(time.time() - epoch_start),
             "eval": eval_metrics,
+            "group_eval": group_metrics,
         }
         metrics["epochs"].append(epoch_record)
         write_json(exp_dir / "metrics.json", metrics)
 
-        append_csv(
-            exp_dir / "train_log.csv",
-            {
-                "event": "epoch",
-                "epoch": epoch + 1,
-                "iteration": 0,
-                "global_step": global_step,
-                "lr": optimizer.param_groups[0]["lr"],
-                "backbone_lr": lr_values["backbone_lr"],
-                "head_lr": lr_values["head_lr"],
-                "loss": "",
-                "epoch_loss": epoch_loss,
-                "mean_norm": epoch_norm,
-                "elapsed_sec": epoch_record["elapsed_sec"],
-            },
-        )
+        epoch_row = {
+            "event": "epoch",
+            "epoch": epoch + 1,
+            "iteration": 0,
+            "global_step": global_step,
+            "lr": optimizer.param_groups[0]["lr"],
+            "backbone_lr": lr_values["backbone_lr"],
+            "head_lr": lr_values["head_lr"],
+            "loss": "",
+            "epoch_loss": epoch_loss,
+            "mean_norm": epoch_norm,
+            "elapsed_sec": epoch_record["elapsed_sec"],
+        }
+        add_group_metrics(epoch_row, group_metrics)
+        append_csv(exp_dir / "train_log.csv", epoch_row)
 
         checkpoint = make_checkpoint(
             epoch=epoch + 1,

@@ -40,11 +40,10 @@ OUTPUT_ROOT = Path("/kaggle/working/experiments")
 
 EVAL_TARGETS = [
     "lfw",
-    "cfp_ff",
     "cfp_fp",
+    "cplfw",
     "agedb_30",
     "calfw",
-    "cplfw",
     "sllfw",
     "talfw",
 ]

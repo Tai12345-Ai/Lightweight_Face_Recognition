@@ -43,9 +43,11 @@ from train_phase2_kaggle import (
 )
 
 
-HQ_EVAL_TARGETS = ("lfw", "cfp_ff", "cfp_fp", "agedb_30", "calfw", "cplfw")
+# Paper-style high-quality average: LFW, CFP-FP, CPLFW, AgeDB, CALFW.
+HQ_EVAL_TARGETS = ("lfw", "cfp_fp", "cplfw", "agedb_30", "calfw")
 LQ_EVAL_TARGETS = ("sllfw", "talfw")
-ALL_EVAL_TARGETS = HQ_EVAL_TARGETS + LQ_EVAL_TARGETS
+EVAL7_TARGETS = HQ_EVAL_TARGETS + LQ_EVAL_TARGETS
+ALL_EVAL_TARGETS = EVAL7_TARGETS
 LOSS_STAT_KEYS = (
     "q_mean",
     "q_std",
@@ -155,7 +157,7 @@ def parse_args():
         "--eval-targets",
         "--val-targets",
         dest="val_targets",
-        default="lfw,cfp_ff,cfp_fp,agedb_30,calfw,cplfw,sllfw,talfw",
+        default="lfw,cfp_fp,cplfw,agedb_30,calfw,sllfw,talfw",
         help="Comma-separated verification .bin names under eval_dir.",
     )
     parser.add_argument("--t_alpha", "--t-alpha", dest="t_alpha", type=float, default=0.01)
@@ -228,14 +230,15 @@ def compute_group_eval(eval_metrics: Dict) -> Dict[str, float]:
 
     hq_avg = _complete_accuracy_mean(eval_metrics, HQ_EVAL_TARGETS)
     lq_avg = _complete_accuracy_mean(eval_metrics, LQ_EVAL_TARGETS)
+    eval7_avg = _complete_accuracy_mean(eval_metrics, EVAL7_TARGETS)
     all_avg = _complete_accuracy_mean(eval_metrics, ALL_EVAL_TARGETS)
 
     if hq_avg is not None:
         group_metrics["HQ_Avg"] = hq_avg
     if lq_avg is not None:
         group_metrics["LQ_Avg"] = lq_avg
-    if hq_avg is not None and lq_avg is not None:
-        group_metrics["HLQ_Avg"] = float(np.mean([hq_avg, lq_avg]))
+    if eval7_avg is not None:
+        group_metrics["Eval7_Avg"] = eval7_avg
     if all_avg is not None:
         group_metrics["All_Avg"] = all_avg
 
@@ -243,8 +246,8 @@ def compute_group_eval(eval_metrics: Dict) -> Dict[str, float]:
 
 
 def select_eval_score(eval_metrics: Dict, group_metrics: Dict[str, float]):
-    if "HLQ_Avg" in group_metrics:
-        return group_metrics["HLQ_Avg"], "HLQ_Avg"
+    if "HQ_Avg" in group_metrics:
+        return group_metrics["HQ_Avg"], "HQ_Avg"
     if "All_Avg" in group_metrics:
         return group_metrics["All_Avg"], "All_Avg"
     if eval_metrics:
@@ -261,7 +264,7 @@ def add_loss_stats(row: Dict, loss_stats: Dict) -> Dict:
 
 
 def add_group_metrics(row: Dict, group_metrics: Dict[str, float]) -> Dict:
-    for key in ("HQ_Avg", "LQ_Avg", "HLQ_Avg", "All_Avg"):
+    for key in ("HQ_Avg", "LQ_Avg", "Eval7_Avg", "All_Avg"):
         row[key] = group_metrics.get(key, "")
     return row
 
@@ -644,10 +647,10 @@ def main():
             group_metrics = compute_group_eval(eval_metrics)
             if group_metrics:
                 logging.info(
-                    "group_eval HQ_Avg=%s LQ_Avg=%s HLQ_Avg=%s All_Avg=%s",
+                    "group_eval HQ_Avg=%s LQ_Avg=%s Eval7_Avg=%s All_Avg=%s",
                     f"{group_metrics['HQ_Avg']:.5f}" if "HQ_Avg" in group_metrics else "NA",
                     f"{group_metrics['LQ_Avg']:.5f}" if "LQ_Avg" in group_metrics else "NA",
-                    f"{group_metrics['HLQ_Avg']:.5f}" if "HLQ_Avg" in group_metrics else "NA",
+                    f"{group_metrics['Eval7_Avg']:.5f}" if "Eval7_Avg" in group_metrics else "NA",
                     f"{group_metrics['All_Avg']:.5f}" if "All_Avg" in group_metrics else "NA",
                 )
 

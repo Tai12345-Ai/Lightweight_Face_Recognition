@@ -32,11 +32,10 @@ OUTPUT_ROOT = Path("/kaggle/working/experiments")
 
 EVAL_TARGETS = [
     "lfw",
-    "cfp_ff",
     "cfp_fp",
+    "cplfw",
     "agedb_30",
     "calfw",
-    "cplfw",
     "sllfw",
     "talfw",
 ]
@@ -413,9 +412,10 @@ for metrics_path in sorted((OUTPUT_ROOT / "phase2_loss").glob(f"{BACKBONE}_{LOSS
             "backbone_lr": ep.get("backbone_lr"),
             "head_lr": ep.get("head_lr"),
             "HQ_Avg": complete_accuracy_mean(
-                evals, ["lfw", "cfp_ff", "cfp_fp", "agedb_30", "calfw", "cplfw"]
+                evals, ["lfw", "cfp_fp", "cplfw", "agedb_30", "calfw"]
             ),
             "LQ_Avg": complete_accuracy_mean(evals, ["sllfw", "talfw"]),
+            "Eval7_Avg": complete_accuracy_mean(evals, EVAL_TARGETS),
             "All_Avg": complete_accuracy_mean(evals, EVAL_TARGETS),
         }
         for name, item in evals.items():
