@@ -19,7 +19,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from backbones import get_model
-from soft_gated_losses import SoftGatedAdaCurricularFaceLoss
+from soft_gated_losses import (
+    AdaptiveSoftGatedAdaCurricularFaceV2Loss,
+    SoftGatedAdaCurricularFaceLoss,
+)
 from train_phase2_kaggle import (
     MarginSoftmaxHead,
     amp_autocast,
@@ -53,9 +56,18 @@ LOSS_STAT_KEYS = (
     "q_std",
     "q_min",
     "q_max",
+    "q_pos_mean",
+    "lambda_i_mean",
+    "lambda_i_max",
     "u_pos_mean",
     "arc_anchor_mean",
     "tau_mean",
+    "D_mean",
+    "D_max",
+    "alpha_mean",
+    "alpha_max_actual",
+    "soft_hard_ratio",
+    "effective_mod_ratio",
     "hard_negative_ratio",
     "curricular_t",
 )
@@ -68,14 +80,27 @@ def parse_args():
     parser.add_argument(
         "--loss",
         default="soft_gated_ada_curricular",
-        choices=["soft_gated_ada_curricular"],
+        choices=[
+            "soft_gated_ada_curricular",
+            "adaptive_soft_gated_ada_curricular_v2",
+        ],
         help="Standalone loss name for config compatibility.",
     )
     parser.add_argument("--network", "--backbone", dest="backbone", default="r18", choices=["r18"])
     parser.add_argument("--s", type=float, default=64.0)
     parser.add_argument("--m", type=float, default=0.4)
     parser.add_argument("--h", type=float, default=0.333)
-    parser.add_argument("--lambda_gate", "--lambda-gate", dest="lambda_gate", type=float, required=True)
+    parser.add_argument("--lambda_gate", "--lambda-gate", dest="lambda_gate", type=float, default=None)
+    parser.add_argument("--lambda_max", "--lambda-max", dest="lambda_max", type=float, default=0.3)
+    parser.add_argument("--alpha_max", "--alpha-max", dest="alpha_max", type=float, default=0.5)
+    parser.add_argument("--gate_gamma", "--gate-gamma", dest="gate_gamma", type=float, default=5.0)
+    parser.add_argument(
+        "--lambda_warmup_epochs",
+        "--lambda-warmup-epochs",
+        dest="lambda_warmup_epochs",
+        type=float,
+        default=2.0,
+    )
     parser.add_argument(
         "--train_data",
         "--train-data",
@@ -169,7 +194,10 @@ def parse_args():
         default=0.99,
     )
     parser.add_argument("--eps", type=float, default=1e-3)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.loss == "soft_gated_ada_curricular" and args.lambda_gate is None:
+        parser.error("--lambda_gate is required when --loss soft_gated_ada_curricular")
+    return args
 
 
 def lambda_tag(value: float) -> str:
@@ -180,14 +208,21 @@ def lambda_tag(value: float) -> str:
 
 
 def experiment_dir(args) -> Path:
+    if args.loss == "adaptive_soft_gated_ada_curricular_v2":
+        name = (
+            f"{args.backbone}_proposed2"
+            f"_lmax_{float_tag(args.lambda_max)}"
+            f"_amax_{float_tag(args.alpha_max)}"
+            f"_gamma_{float_tag(args.gate_gamma)}"
+        )
+        if getattr(args, "use_split_lr", False):
+            name += f"_blr_{float_tag(args.backbone_lr)}_hlr_{float_tag(args.head_lr)}"
+        return Path(args.output_dir) / "proposed2_sweep" / name
+
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
     if getattr(args, "use_split_lr", False):
         name += f"_blr_{float_tag(args.backbone_lr)}_hlr_{float_tag(args.head_lr)}"
-    return (
-        Path(args.output_dir)
-        / "soft_gated_lambda_sweep"
-        / name
-    )
+    return Path(args.output_dir) / "soft_gated_lambda_sweep" / name
 
 
 def json_safe_config(args, exp_dir: Path) -> Dict:
@@ -248,8 +283,8 @@ def compute_group_eval(eval_metrics: Dict) -> Dict[str, float]:
 def select_eval_score(eval_metrics: Dict, group_metrics: Dict[str, float]):
     if "HQ_Avg" in group_metrics:
         return group_metrics["HQ_Avg"], "HQ_Avg"
-    if "All_Avg" in group_metrics:
-        return group_metrics["All_Avg"], "All_Avg"
+    if "Eval7_Avg" in group_metrics:
+        return group_metrics["Eval7_Avg"], "Eval7_Avg"
     if eval_metrics:
         values = [float(item["accuracy"]) for item in eval_metrics.values()]
         return float(np.mean(values)), "mean_validation_accuracy"
@@ -286,7 +321,15 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
         if saved_value is not None and current_value != saved_value:
             mismatches.append(f"{key}: checkpoint={saved_value!r} current={current_value!r}")
 
-    for key in ("s", "m", "h", "lambda_gate"):
+    float_keys = ["s", "m", "h"]
+    if args.loss == "adaptive_soft_gated_ada_curricular_v2":
+        float_keys.extend(
+            ["lambda_max", "alpha_max", "gate_gamma", "lambda_warmup_epochs"]
+        )
+    else:
+        float_keys.append("lambda_gate")
+
+    for key in float_keys:
         saved_value = checkpoint_config.get(key)
         current_value = getattr(args, key, None)
         if saved_value is not None and not _same_float(saved_value, current_value):
@@ -389,15 +432,29 @@ def main():
         num_features=args.embedding_size,
     ).to(device)
 
-    margin_loss = SoftGatedAdaCurricularFaceLoss(
-        s=args.s,
-        m=args.m,
-        h=args.h,
-        lambda_gate=args.lambda_gate,
-        t_alpha=args.t_alpha,
-        curriculum_alpha=args.curriculum_alpha,
-        eps=args.eps,
-    )
+    if args.loss == "adaptive_soft_gated_ada_curricular_v2":
+        margin_loss = AdaptiveSoftGatedAdaCurricularFaceV2Loss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            lambda_max=args.lambda_max,
+            alpha_max=args.alpha_max,
+            gate_gamma=args.gate_gamma,
+            lambda_warmup_epochs=args.lambda_warmup_epochs,
+            t_alpha=args.t_alpha,
+            curriculum_alpha=args.curriculum_alpha,
+            eps=args.eps,
+        )
+    else:
+        margin_loss = SoftGatedAdaCurricularFaceLoss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            lambda_gate=args.lambda_gate,
+            t_alpha=args.t_alpha,
+            curriculum_alpha=args.curriculum_alpha,
+            eps=args.eps,
+        )
     head = MarginSoftmaxHead(
         embedding_size=args.embedding_size,
         num_classes=num_classes,
@@ -454,21 +511,42 @@ def main():
     eval_dir = args.eval_dir or args.data_dir
 
     logging.info("Experiment dir: %s", exp_dir)
-    logging.info(
-        (
-            "Training loss=%s lambda_gate=%.4f backbone=%s classes=%d images=%d "
-            "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
-        ),
-        args.loss,
-        args.lambda_gate,
-        args.backbone,
-        num_classes,
-        len(dataset),
-        args.batch_size,
-        args.lr,
-        args.backbone_lr,
-        args.head_lr,
-    )
+    if args.loss == "adaptive_soft_gated_ada_curricular_v2":
+        logging.info(
+            (
+                "Training loss=%s lambda_max=%.4f alpha_max=%.4f gate_gamma=%.4f "
+                "lambda_warmup_epochs=%.3f backbone=%s classes=%d images=%d "
+                "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
+            ),
+            args.loss,
+            args.lambda_max,
+            args.alpha_max,
+            args.gate_gamma,
+            args.lambda_warmup_epochs,
+            args.backbone,
+            num_classes,
+            len(dataset),
+            args.batch_size,
+            args.lr,
+            args.backbone_lr,
+            args.head_lr,
+        )
+    else:
+        logging.info(
+            (
+                "Training loss=%s lambda_gate=%.4f backbone=%s classes=%d images=%d "
+                "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
+            ),
+            args.loss,
+            args.lambda_gate,
+            args.backbone,
+            num_classes,
+            len(dataset),
+            args.batch_size,
+            args.lr,
+            args.backbone_lr,
+            args.head_lr,
+        )
     logging.info("train_data=%s", args.data_dir)
     logging.info("eval_dir=%s eval_targets=%s", eval_dir, ",".join(val_targets))
     logging.info(
@@ -492,6 +570,8 @@ def main():
     run_start = time.time()
 
     for epoch in range(start_epoch, args.epochs):
+        if hasattr(margin_loss, "set_epoch"):
+            margin_loss.set_epoch(epoch)
         train_loader = make_train_loader(args, dataset, device, epoch=epoch)
         epoch_start = time.time()
         if not args.freeze_backbone:
@@ -570,7 +650,15 @@ def main():
                     "loss": loss.item(),
                     "epoch_loss": "",
                     "mean_norm": norms.detach().mean().item(),
-                    "lambda_gate": args.lambda_gate,
+                    "lambda_gate": args.lambda_gate if args.lambda_gate is not None else "",
+                    "lambda_max": args.lambda_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+                    "alpha_max": args.alpha_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+                    "gate_gamma": args.gate_gamma if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+                    "lambda_warmup_epochs": (
+                        args.lambda_warmup_epochs
+                        if args.loss == "adaptive_soft_gated_ada_curricular_v2"
+                        else ""
+                    ),
                     "elapsed_sec": int(time.time() - epoch_start),
                 }
                 add_loss_stats(row, last_loss_stats)
@@ -674,11 +762,21 @@ def main():
             "lr": float(optimizer.param_groups[0]["lr"]),
             "backbone_lr": lr_values["backbone_lr"],
             "head_lr": lr_values["head_lr"],
-            "lambda_gate": float(args.lambda_gate),
+            "lambda_gate": float(args.lambda_gate) if args.lambda_gate is not None else None,
             "elapsed_sec": int(time.time() - epoch_start),
             "eval": eval_metrics,
             "group_eval": group_metrics,
         }
+        if args.loss == "adaptive_soft_gated_ada_curricular_v2":
+            epoch_record.update(
+                {
+                    "lambda_max": float(args.lambda_max),
+                    "alpha_max": float(args.alpha_max),
+                    "gate_gamma": float(args.gate_gamma),
+                    "lambda_warmup_epochs": float(args.lambda_warmup_epochs),
+                }
+            )
+        add_loss_stats(epoch_record, last_loss_stats)
         metrics["epochs"].append(epoch_record)
         write_json(exp_dir / "metrics.json", metrics)
 
@@ -693,7 +791,15 @@ def main():
             "loss": "",
             "epoch_loss": epoch_loss,
             "mean_norm": epoch_norm,
-            "lambda_gate": args.lambda_gate,
+            "lambda_gate": args.lambda_gate if args.lambda_gate is not None else "",
+            "lambda_max": args.lambda_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+            "alpha_max": args.alpha_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+            "gate_gamma": args.gate_gamma if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+            "lambda_warmup_epochs": (
+                args.lambda_warmup_epochs
+                if args.loss == "adaptive_soft_gated_ada_curricular_v2"
+                else ""
+            ),
             "elapsed_sec": epoch_record["elapsed_sec"],
         }
         add_group_metrics(epoch_row, group_metrics)

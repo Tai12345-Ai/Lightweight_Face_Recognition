@@ -137,3 +137,175 @@ class SoftGatedAdaCurricularFaceLoss(nn.Module):
         rows.scatter_(1, target.view(-1, 1), u_pos.view(-1, 1))
         logits[index] = rows
         return logits * self.s
+
+
+class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
+    """AdaFace-positive, soft adaptive CurricularFace-negative loss.
+
+    This keeps the AdaFace positive branch and CurricularFace negative branch,
+    but replaces the fixed hard negative gate with detached quality and
+    difficulty-aware soft modulation.
+    """
+
+    requires_norms = True
+    requires_embeddings = False
+
+    def __init__(
+        self,
+        s: float = 64.0,
+        m: float = 0.4,
+        h: float = 0.333,
+        lambda_max: float = 0.3,
+        alpha_max: float = 0.5,
+        gate_gamma: float = 5.0,
+        lambda_warmup_epochs: float = 2.0,
+        t_alpha: float = 0.01,
+        curriculum_alpha: float = 0.99,
+        eps: float = 1e-3,
+    ):
+        super().__init__()
+        if not 0.0 <= lambda_max <= 1.0:
+            raise ValueError("lambda_max must be in [0, 1].")
+        if alpha_max < 0.0:
+            raise ValueError("alpha_max must be non-negative.")
+        if gate_gamma < 0.0:
+            raise ValueError("gate_gamma must be non-negative.")
+        if lambda_warmup_epochs < 0.0:
+            raise ValueError("lambda_warmup_epochs must be non-negative.")
+        self.s = s
+        self.m = m
+        self.h = h
+        self.lambda_max = lambda_max
+        self.alpha_max = alpha_max
+        self.gate_gamma = gate_gamma
+        self.lambda_warmup_epochs = lambda_warmup_epochs
+        self.t_alpha = t_alpha
+        self.curriculum_alpha = curriculum_alpha
+        self.eps = eps
+        self.current_epoch = 0.0
+        self.last_stats = {}
+        self.register_buffer("batch_mean", torch.ones(1) * 20.0)
+        self.register_buffer("batch_std", torch.ones(1) * 100.0)
+        self.register_buffer("t", torch.zeros(1))
+
+    def set_epoch(self, epoch) -> None:
+        self.current_epoch = float(epoch)
+
+    def _warmup_ratio(self) -> float:
+        if self.lambda_warmup_epochs <= 0.0:
+            return 1.0
+        return min(1.0, max(0.0, self.current_epoch / self.lambda_warmup_epochs))
+
+    def _quality_indicator(self, labels: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        index, _ = _positive_indices(labels)
+        safe_norms = norms.view(-1, 1).clamp(min=0.001, max=100.0).detach()
+
+        with torch.no_grad():
+            positive_norms = safe_norms[index]
+            if positive_norms.numel() > 1:
+                batch_mean = positive_norms.mean()
+                batch_std = positive_norms.std(unbiased=False).clamp_min(self.eps)
+                self.batch_mean.mul_(1.0 - self.t_alpha).add_(batch_mean * self.t_alpha)
+                self.batch_std.mul_(1.0 - self.t_alpha).add_(batch_std * self.t_alpha)
+
+        q = (safe_norms[index].view(-1) - self.batch_mean) / (
+            self.batch_std + self.eps
+        )
+        return (q * self.h).clamp(-1.0, 1.0).detach()
+
+    def forward(self, logits, labels, embeddings=None, norms=None):
+        if norms is None:
+            raise RuntimeError(
+                "AdaptiveSoftGatedAdaCurricularFaceV2Loss requires feature norms."
+            )
+
+        index, target = _positive_indices(labels)
+        logits = logits.clone()
+        if index.numel() == 0:
+            self.last_stats = {}
+            return logits * self.s
+
+        rows = logits[index].clone()
+        q = self._quality_indicator(labels, norms).to(dtype=rows.dtype)
+        q_pos = q.clamp_min(0.0)
+        target_cos = _safe_cosine(
+            rows.gather(1, target.view(-1, 1)).view(-1), eps=self.eps
+        )
+        theta_y = target_cos.acos()
+
+        u_pos = torch.cos(theta_y - self.m * q)
+        u_pos = (u_pos - (self.m * q + self.m)).to(dtype=rows.dtype)
+        arc_anchor = torch.cos(theta_y + self.m).to(dtype=rows.dtype)
+
+        rho = self._warmup_ratio()
+        lambda_i = (self.lambda_max * rho * q_pos).detach()
+        tau = (
+            (1.0 - lambda_i) * arc_anchor.detach()
+            + lambda_i * u_pos.detach()
+        ).detach()
+
+        with torch.no_grad():
+            self.t.mul_(self.curriculum_alpha).add_(
+                arc_anchor.detach().mean() * (1.0 - self.curriculum_alpha)
+            )
+
+        one_hot = torch.zeros_like(rows, dtype=torch.bool)
+        one_hot.scatter_(1, target.view(-1, 1), True)
+        negative_mask = ~one_hot
+
+        d_gate = torch.sigmoid(
+            self.gate_gamma * (rows.detach() - tau.view(-1, 1))
+        ).detach()
+        alpha = (
+            self.alpha_max
+            * rho
+            * q_pos.detach().view(-1, 1)
+            * d_gate
+        ).detach()
+
+        t = self.t.to(dtype=rows.dtype)
+        curricular_neg = rows * (t + rows)
+        soft_adaptive_neg = rows + alpha.to(dtype=rows.dtype) * (curricular_neg - rows)
+        rows = torch.where(negative_mask, soft_adaptive_neg, rows).to(dtype=rows.dtype)
+        rows.scatter_(1, target.view(-1, 1), u_pos.view(-1, 1))
+        logits[index] = rows
+
+        with torch.no_grad():
+            q_float = q.detach().float()
+            q_pos_float = q_pos.detach().float()
+            lambda_float = lambda_i.detach().float()
+            d_neg = d_gate.masked_select(negative_mask).detach().float()
+            alpha_neg = alpha.masked_select(negative_mask).detach().float()
+            if d_neg.numel() == 0:
+                d_mean = d_max = soft_hard_ratio = 0.0
+            else:
+                d_mean = float(d_neg.mean().item())
+                d_max = float(d_neg.max().item())
+                soft_hard_ratio = float((d_neg > 0.5).float().mean().item())
+            if alpha_neg.numel() == 0:
+                alpha_mean = alpha_max_actual = effective_mod_ratio = 0.0
+            else:
+                alpha_mean = float(alpha_neg.mean().item())
+                alpha_max_actual = float(alpha_neg.max().item())
+                effective_mod_ratio = float((alpha_neg > 0.05).float().mean().item())
+
+            self.last_stats = {
+                "q_mean": float(q_float.mean().item()),
+                "q_std": float(q_float.std(unbiased=False).item()),
+                "q_min": float(q_float.min().item()),
+                "q_max": float(q_float.max().item()),
+                "q_pos_mean": float(q_pos_float.mean().item()),
+                "lambda_i_mean": float(lambda_float.mean().item()),
+                "lambda_i_max": float(lambda_float.max().item()),
+                "u_pos_mean": float(u_pos.detach().float().mean().item()),
+                "arc_anchor_mean": float(arc_anchor.detach().float().mean().item()),
+                "tau_mean": float(tau.detach().float().mean().item()),
+                "D_mean": d_mean,
+                "D_max": d_max,
+                "alpha_mean": alpha_mean,
+                "alpha_max_actual": alpha_max_actual,
+                "soft_hard_ratio": soft_hard_ratio,
+                "effective_mod_ratio": effective_mod_ratio,
+                "curricular_t": float(self.t.detach().item()),
+            }
+        return logits * self.s

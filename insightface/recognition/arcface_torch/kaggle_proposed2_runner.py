@@ -1,14 +1,14 @@
 # %% [markdown]
-# # Soft-Gated Ada-CurricularFace Lambda Sweep
+# # Proposed V2 Adaptive Soft-Gated Ada-CurricularFace Sweep
 #
-# Standalone Kaggle runner for testing fixed ``lambda_gate`` values before
-# promoting the loss into the main Phase 2 loss registry.
+# Standalone Kaggle runner for:
+# `adaptive_soft_gated_ada_curricular_v2`
 #
 # It trains only on:
-# ``/kaggle/input/CASIA-WebFace/casia-webface``
+# `/kaggle/input/CASIA-WebFace/casia-webface`
 #
 # It evaluates only on .bin files under:
-# ``/kaggle/input/CASIA-WebFace/eval``
+# `/kaggle/input/CASIA-WebFace/eval`
 
 # %% [markdown]
 # ## Cell 1: Clone Repo And Install Dependencies
@@ -47,6 +47,8 @@ EVAL_TARGETS = [
     "sllfw",
     "talfw",
 ]
+HQ_EVAL_TARGETS = ["lfw", "cfp_fp", "cplfw", "agedb_30", "calfw"]
+LQ_EVAL_TARGETS = ["sllfw", "talfw"]
 
 
 def run(cmd, cwd=None, check=True):
@@ -176,42 +178,42 @@ print("OUTPUT_ROOT:", OUTPUT_ROOT)
 print("NUM_CLASSES:", NUM_CLASSES)
 
 # %% [markdown]
-# ## Cell 3: Restore Previous Sweep Outputs
+# ## Cell 3: Restore Previous Proposed V2 Outputs
 #
 # `Save & Run All` starts from a clean `/kaggle/working`. To resume across
 # Kaggle versions, add a previous version output as an input dataset. This cell
-# restores either `soft_gated_lambda_sweep.zip` or a `soft_gated_lambda_sweep`
-# folder from `/kaggle/input` back into `/kaggle/working/experiments`.
+# restores either `proposed2_sweep.zip` or a `proposed2_sweep` folder from
+# `/kaggle/input` back into `/kaggle/working/experiments`.
 
 # %%
-SWEEP_ROOT = OUTPUT_ROOT / "soft_gated_lambda_sweep"
+SWEEP_ROOT = OUTPUT_ROOT / "proposed2_sweep"
 restored = False
 
-for zip_candidate in sorted(Path("/kaggle/input").rglob("soft_gated_lambda_sweep.zip")):
-    print("Restoring previous sweep zip:", zip_candidate)
+for zip_candidate in sorted(Path("/kaggle/input").rglob("proposed2_sweep.zip")):
+    print("Restoring previous proposed2 sweep zip:", zip_candidate)
     with zipfile.ZipFile(zip_candidate, "r") as f:
         f.extractall(OUTPUT_ROOT)
     restored = True
     break
 
 if not restored:
-    for folder_candidate in sorted(Path("/kaggle/input").rglob("soft_gated_lambda_sweep")):
+    for folder_candidate in sorted(Path("/kaggle/input").rglob("proposed2_sweep")):
         if folder_candidate.is_dir():
-            print("Restoring previous sweep folder:", folder_candidate)
+            print("Restoring previous proposed2 sweep folder:", folder_candidate)
             shutil.copytree(folder_candidate, SWEEP_ROOT, dirs_exist_ok=True)
             restored = True
             break
 
 if restored:
-    print("Restored previous sweep outputs to:", SWEEP_ROOT)
+    print("Restored previous proposed2 outputs to:", SWEEP_ROOT)
 else:
-    print("No previous sweep output input found. Starting from pretrained backbone.")
+    print("No previous proposed2 output input found. Starting from pretrained backbone.")
 
 # %% [markdown]
 # ## Cell 4: Preflight
 #
-# Compile the soft-gated loss, standalone train script, and reused Phase 2
-# helpers before launching long Kaggle jobs.
+# Compile the proposed loss, standalone train script, reused Phase 2 helpers,
+# and this runner before launching long Kaggle jobs.
 
 # %%
 run([
@@ -221,57 +223,139 @@ run([
     "soft_gated_losses.py",
     "train_soft_gated_lambda_kaggle.py",
     "train_phase2_kaggle.py",
-    "eval_degraded_phase2.py",
-    "recordio_fallback.py",
+    "kaggle_proposed2_runner.py",
 ], cwd=ARCFACE_DIR)
 
 import torch
-from backbones import get_model
-from train_phase2_kaggle import torch_load_cpu, extract_backbone_state, build_dataset
-
-NUM_CLASSES = 10575
 
 print("TRAIN_DATA_DIR:", TRAIN_DATA_DIR)
 print("EVAL_DIR:", EVAL_DIR)
 print("PRETRAINED_BACKBONE:", PRETRAINED_BACKBONE)
 print("EVAL_TARGETS:", ",".join(EVAL_TARGETS))
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("device:", device)
-if device == "cuda":
+if device.type == "cuda":
     print("GPU:", torch.cuda.get_device_name(0))
 
-assert device == "cuda", "CUDA/GPU is required"
+assert device.type == "cuda", "CUDA/GPU is required"
 assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
 assert PRETRAINED_BACKBONE.exists(), f"Missing backbone: {PRETRAINED_BACKBONE}"
 
 # %% [markdown]
-# ## Cell 5: Lambda Sweep
-#
-# Train `soft_gated_ada_curricular` for fixed lambda values. Each lambda has
-# its own output folder and resumes from `latest.pt` if present.
+# ## Cell 5: One-Batch Debug
 
 # %%
+from backbones import get_model
+from soft_gated_losses import AdaptiveSoftGatedAdaCurricularFaceV2Loss
+from train_phase2_kaggle import MarginSoftmaxHead, amp_autocast, make_grad_scaler
+
 BACKBONE = "r18"
-EPOCHS = 20
+BACKBONE_LR = 2e-4
+HEAD_LR = 2e-3
 BATCH_SIZE = 128
-LR = 0.01
-BACKBONE_LR = 0.001
-HEAD_LR = 0.01
-WARMUP_EPOCHS = 1.0
-EVAL_EVERY = 1
-SAVE_EVERY_STEPS = 300
-SAVE_EVERY_EPOCHS = 1
-MAX_TRAIN_MINUTES = 480
-MIN_TRAIN_MINUTES_TO_START = 2
-NUM_WORKERS = 2
 USE_FP16 = True
 
 S = 64.0
 M = 0.4
 H = 0.333
-LAMBDA_SWEEP = [0.5, 0.4, 0.2, 0.0]
+LAMBDA_WARMUP_EPOCHS = 2.0
+
+DEBUG_LAMBDA_MAX = 0.3
+DEBUG_ALPHA_MAX = 0.5
+DEBUG_GATE_GAMMA = 5.0
+DEBUG_BATCH_SIZE = min(8, BATCH_SIZE)
+
+use_amp = bool(USE_FP16 and device.type == "cuda")
+debug_backbone = get_model(
+    BACKBONE,
+    dropout=0.0,
+    fp16=use_amp,
+    num_features=512,
+).to(device)
+debug_margin_loss = AdaptiveSoftGatedAdaCurricularFaceV2Loss(
+    s=S,
+    m=M,
+    h=H,
+    lambda_max=DEBUG_LAMBDA_MAX,
+    alpha_max=DEBUG_ALPHA_MAX,
+    gate_gamma=DEBUG_GATE_GAMMA,
+    lambda_warmup_epochs=LAMBDA_WARMUP_EPOCHS,
+)
+debug_margin_loss.set_epoch(1)
+debug_head = MarginSoftmaxHead(
+    embedding_size=512,
+    num_classes=NUM_CLASSES,
+    margin_loss=debug_margin_loss,
+    fp16=use_amp,
+).to(device)
+debug_optimizer = torch.optim.SGD(
+    [
+        {"params": debug_backbone.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
+        {"params": debug_head.parameters(), "lr": HEAD_LR, "name": "head"},
+    ],
+    momentum=0.9,
+    weight_decay=5e-4,
+)
+debug_scaler = make_grad_scaler(use_amp)
+debug_images = torch.randn(DEBUG_BATCH_SIZE, 3, 112, 112, device=device)
+debug_labels = (torch.arange(DEBUG_BATCH_SIZE, device=device) % NUM_CLASSES).long()
+
+debug_optimizer.zero_grad(set_to_none=True)
+with amp_autocast(use_amp):
+    debug_embeddings = debug_backbone(debug_images)
+    debug_loss, debug_logits, debug_norms = debug_head(debug_embeddings, debug_labels)
+
+assert torch.isfinite(debug_loss).item(), "debug loss is NaN or Inf"
+assert debug_logits.shape == (DEBUG_BATCH_SIZE, NUM_CLASSES), debug_logits.shape
+
+if use_amp:
+    debug_scaler.scale(debug_loss).backward()
+    debug_scaler.step(debug_optimizer)
+    debug_scaler.update()
+else:
+    debug_loss.backward()
+    debug_optimizer.step()
+
+stats = debug_margin_loss.last_stats
+assert -1.0 <= stats["q_min"] <= 1.0, stats
+assert -1.0 <= stats["q_max"] <= 1.0, stats
+assert 0.0 <= stats["q_pos_mean"] <= 1.0, stats
+assert 0.0 <= stats["lambda_i_mean"] <= DEBUG_LAMBDA_MAX + 1e-6, stats
+assert 0.0 <= stats["lambda_i_max"] <= DEBUG_LAMBDA_MAX + 1e-6, stats
+assert 0.0 <= stats["D_mean"] <= 1.0, stats
+assert 0.0 <= stats["D_max"] <= 1.0, stats
+assert 0.0 <= stats["alpha_mean"] <= DEBUG_ALPHA_MAX + 1e-6, stats
+assert 0.0 <= stats["alpha_max_actual"] <= DEBUG_ALPHA_MAX + 1e-6, stats
+
+print("debug_loss:", float(debug_loss.detach().cpu().item()))
+print("debug_logits_shape:", tuple(debug_logits.shape))
+print("debug_norm_mean:", float(debug_norms.detach().mean().cpu().item()))
+print("last_stats:", json.dumps(stats, indent=2, sort_keys=True))
+
+del debug_backbone, debug_head, debug_margin_loss, debug_optimizer
+del debug_images, debug_labels, debug_embeddings, debug_logits, debug_norms, debug_loss
+if device.type == "cuda":
+    torch.cuda.empty_cache()
+
+# %% [markdown]
+# ## Cell 6: Proposed V2 Sweep
+
+# %%
+EPOCHS = 10
+EVAL_EVERY = 1
+SAVE_EVERY_EPOCHS = 1
+SAVE_EVERY_STEPS = 300
+NUM_WORKERS = 2
+MAX_TRAIN_MINUTES = 480
+MIN_TRAIN_MINUTES_TO_START = 2
 SWEEP_START_TIME = time.time()
+
+PROPOSED2_SWEEP = [
+    {"lambda_max": 0.3, "alpha_max": 0.5, "gate_gamma": 5.0},
+    {"lambda_max": 0.3, "alpha_max": 1.0, "gate_gamma": 5.0},
+    {"lambda_max": 0.3, "alpha_max": 0.5, "gate_gamma": 10.0},
+]
 
 
 def remaining_train_minutes():
@@ -281,31 +365,28 @@ def remaining_train_minutes():
     return max(0.0, MAX_TRAIN_MINUTES - elapsed_minutes)
 
 
-def lambda_tag(value):
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    if "." not in text:
-        text += ".0"
-    return text.replace("-", "m").replace(".", "p")
-
-
 def float_tag(value):
     text = f"{float(value):.6g}"
     return text.replace("-", "m").replace(".", "p")
 
 
-def exp_dir(lambda_gate):
+def exp_dir(config):
     return (
         OUTPUT_ROOT
-        / "soft_gated_lambda_sweep"
+        / "proposed2_sweep"
         / (
-            f"{BACKBONE}_soft_gated_ada_curricular_lambda_{lambda_tag(lambda_gate)}"
-            f"_blr_{float_tag(BACKBONE_LR)}_hlr_{float_tag(HEAD_LR)}"
+            f"{BACKBONE}_proposed2"
+            f"_lmax_{float_tag(config['lambda_max'])}"
+            f"_amax_{float_tag(config['alpha_max'])}"
+            f"_gamma_{float_tag(config['gate_gamma'])}"
+            f"_blr_{float_tag(BACKBONE_LR)}"
+            f"_hlr_{float_tag(HEAD_LR)}"
         )
     )
 
 
-def is_complete(lambda_gate):
-    metrics_path = exp_dir(lambda_gate) / "metrics.json"
+def is_complete(config):
+    metrics_path = exp_dir(config) / "metrics.json"
     if not metrics_path.exists():
         return False
     with open(metrics_path, "r", encoding="utf-8") as f:
@@ -313,13 +394,13 @@ def is_complete(lambda_gate):
     return len(metrics.get("epochs", [])) >= EPOCHS
 
 
-print("Cell 5 NUM_CLASSES:", NUM_CLASSES)
+print("Cell 6 NUM_CLASSES:", NUM_CLASSES)
 assert NUM_CLASSES < 100000, f"Bad NUM_CLASSES={NUM_CLASSES}"
 assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
 
-for lambda_gate in LAMBDA_SWEEP:
-    if is_complete(lambda_gate):
-        print(f"[SKIP] lambda_gate={lambda_gate} complete.")
+for config in PROPOSED2_SWEEP:
+    if is_complete(config):
+        print(f"[SKIP] config={config} complete.")
         continue
 
     train_minutes_left = remaining_train_minutes()
@@ -330,12 +411,12 @@ for lambda_gate in LAMBDA_SWEEP:
         )
         break
 
-    latest = exp_dir(lambda_gate) / "latest.pt"
+    latest = exp_dir(config) / "latest.pt"
     cmd = [
         sys.executable,
         "train_soft_gated_lambda_kaggle.py",
         "--loss",
-        "soft_gated_ada_curricular",
+        "adaptive_soft_gated_ada_curricular_v2",
         "--network",
         BACKBONE,
         "--s",
@@ -344,8 +425,14 @@ for lambda_gate in LAMBDA_SWEEP:
         str(M),
         "--h",
         str(H),
-        "--lambda_gate",
-        str(lambda_gate),
+        "--lambda_max",
+        str(config["lambda_max"]),
+        "--alpha_max",
+        str(config["alpha_max"]),
+        "--gate_gamma",
+        str(config["gate_gamma"]),
+        "--lambda_warmup_epochs",
+        str(LAMBDA_WARMUP_EPOCHS),
         "--train_data",
         str(TRAIN_DATA_DIR),
         "--eval_dir",
@@ -357,13 +444,13 @@ for lambda_gate in LAMBDA_SWEEP:
         "--batch_size",
         str(BATCH_SIZE),
         "--lr",
-        str(LR),
+        str(HEAD_LR),
         "--backbone_lr",
         str(BACKBONE_LR),
         "--head_lr",
         str(HEAD_LR),
         "--warmup_epochs",
-        str(WARMUP_EPOCHS),
+        "1.0",
         "--eval_every",
         str(EVAL_EVERY),
         "--save_every",
@@ -383,67 +470,32 @@ for lambda_gate in LAMBDA_SWEEP:
         cmd.append("--fp16")
 
     print(
-        f"[BUDGET] lambda_gate={lambda_gate} "
+        "[BUDGET] "
+        f"lambda_max={config['lambda_max']} alpha_max={config['alpha_max']} "
+        f"gate_gamma={config['gate_gamma']} "
         f"remaining_sweep_train_minutes={train_minutes_left:.1f}"
     )
 
     if latest.exists():
-        print(f"[RESUME] lambda_gate={lambda_gate} from {latest}")
+        print(f"[RESUME] config={config} from {latest}")
         cmd.append("--resume")
     else:
-        print(f"[START] lambda_gate={lambda_gate} from pretrained backbone")
+        print(f"[START] config={config} from pretrained backbone")
         cmd.extend(["--pretrained_backbone", str(PRETRAINED_BACKBONE)])
 
     run(cmd, cwd=ARCFACE_DIR)
 
-    if not is_complete(lambda_gate):
-        print(f"[STOP] lambda_gate={lambda_gate} is not complete yet. Resume next session.")
+    if not is_complete(config):
+        print(f"[STOP] config={config} is not complete yet. Resume next session.")
         break
 
-print("Done. Lambda sweep:", LAMBDA_SWEEP)
+print("Done. Proposed2 sweep:", PROPOSED2_SWEEP)
 print("Learning rates: backbone_lr=", BACKBONE_LR, "head_lr=", HEAD_LR)
 
 # %% [markdown]
-# ## Cell 6: Progress
-#
-# Print epoch count, latest checkpoint, best checkpoint, and best score for
-# each lambda experiment.
+# ## Cell 7: Progress And Best Scores
 
 # %%
-root = OUTPUT_ROOT / "soft_gated_lambda_sweep"
-if not root.exists():
-    print("No soft_gated_lambda_sweep folder yet:", root)
-else:
-    for exp in sorted(root.glob("r18_soft_gated_ada_curricular_lambda_*")):
-        metrics_path = exp / "metrics.json"
-        latest = exp / "latest.pt"
-        best = exp / "best.pth"
-
-        if metrics_path.exists():
-            with open(metrics_path, "r", encoding="utf-8") as f:
-                metrics = json.load(f)
-            epochs = len(metrics.get("epochs", []))
-            best_epoch = metrics.get("best_epoch")
-            best_score = metrics.get("best_score")
-        else:
-            epochs = 0
-            best_epoch = None
-            best_score = None
-
-        print(exp.name)
-        print("  epochs:", epochs)
-        print("  latest:", latest.exists())
-        print("  best:", best.exists())
-        print("  best_epoch:", best_epoch)
-        print("  best_score:", best_score)
-
-# %% [markdown]
-# ## Cell 7: Export Eval By Epoch
-
-# %%
-import pandas as pd
-
-
 def complete_accuracy_mean(eval_metrics, targets):
     values = []
     for target in targets:
@@ -454,8 +506,72 @@ def complete_accuracy_mean(eval_metrics, targets):
     return float(sum(values) / len(values)) if values else None
 
 
+def select_epoch_score(epoch_record):
+    group_eval = epoch_record.get("group_eval", {}) or {}
+    evals = epoch_record.get("eval", {}) or {}
+    if "HQ_Avg" in group_eval:
+        return group_eval["HQ_Avg"], "HQ_Avg"
+    eval7 = group_eval.get("Eval7_Avg")
+    if eval7 is None:
+        eval7 = complete_accuracy_mean(evals, EVAL_TARGETS)
+    if eval7 is not None:
+        return eval7, "Eval7_Avg"
+    if evals:
+        values = [float(item["accuracy"]) for item in evals.values() if "accuracy" in item]
+        if values:
+            return float(sum(values) / len(values)), "mean_validation_accuracy"
+    return None, None
+
+
+root = OUTPUT_ROOT / "proposed2_sweep"
+if not root.exists():
+    print("No proposed2_sweep folder yet:", root)
+else:
+    for exp in sorted(root.glob("r18_proposed2_*")):
+        metrics_path = exp / "metrics.json"
+        latest = exp / "latest.pt"
+        best = exp / "best.pth"
+
+        if metrics_path.exists():
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                metrics = json.load(f)
+            epochs = metrics.get("epochs", [])
+            best_epoch = metrics.get("best_epoch")
+            best_score = metrics.get("best_score")
+            best_metric = metrics.get("best_metric")
+            if best_score is None:
+                selected = [
+                    (ep.get("epoch"),) + select_epoch_score(ep)
+                    for ep in epochs
+                    if select_epoch_score(ep)[0] is not None
+                ]
+                if selected:
+                    best_epoch, best_score, best_metric = max(
+                        selected,
+                        key=lambda item: item[1],
+                    )
+        else:
+            epochs = []
+            best_epoch = None
+            best_score = None
+            best_metric = None
+
+        print(exp.name)
+        print("  epochs:", len(epochs))
+        print("  latest:", latest.exists())
+        print("  best:", best.exists())
+        print("  best_epoch:", best_epoch)
+        print("  best_metric:", best_metric)
+        print("  best_score:", best_score)
+
+# %% [markdown]
+# ## Cell 8: Export Eval By Epoch
+
+# %%
+import pandas as pd
+
 rows = []
-for metrics_path in sorted((OUTPUT_ROOT / "soft_gated_lambda_sweep").glob("r18_soft_gated_ada_curricular_lambda_*/metrics.json")):
+for metrics_path in sorted((OUTPUT_ROOT / "proposed2_sweep").glob("r18_proposed2_*/metrics.json")):
     with open(metrics_path, "r", encoding="utf-8") as f:
         metrics = json.load(f)
     exp_name = metrics_path.parent.name
@@ -471,24 +587,43 @@ for metrics_path in sorted((OUTPUT_ROOT / "soft_gated_lambda_sweep").glob("r18_s
             "lr": ep.get("lr"),
             "backbone_lr": ep.get("backbone_lr"),
             "head_lr": ep.get("head_lr"),
-            "lambda_gate": ep.get("lambda_gate"),
+            "lambda_max": ep.get("lambda_max"),
+            "alpha_max": ep.get("alpha_max"),
+            "gate_gamma": ep.get("gate_gamma"),
+            "lambda_warmup_epochs": ep.get("lambda_warmup_epochs"),
             "HQ_Avg": group_eval.get(
                 "HQ_Avg",
-                complete_accuracy_mean(evals, ["lfw", "cfp_fp", "cplfw", "agedb_30", "calfw"]),
+                complete_accuracy_mean(evals, HQ_EVAL_TARGETS),
             ),
             "LQ_Avg": group_eval.get(
                 "LQ_Avg",
-                complete_accuracy_mean(evals, ["sllfw", "talfw"]),
+                complete_accuracy_mean(evals, LQ_EVAL_TARGETS),
             ),
             "Eval7_Avg": group_eval.get(
                 "Eval7_Avg",
                 complete_accuracy_mean(evals, EVAL_TARGETS),
             ),
-            "All_Avg": group_eval.get(
-                "All_Avg",
-                complete_accuracy_mean(evals, EVAL_TARGETS),
-            ),
         }
+        for key in (
+            "q_mean",
+            "q_std",
+            "q_min",
+            "q_max",
+            "q_pos_mean",
+            "lambda_i_mean",
+            "lambda_i_max",
+            "u_pos_mean",
+            "arc_anchor_mean",
+            "tau_mean",
+            "D_mean",
+            "D_max",
+            "alpha_mean",
+            "alpha_max_actual",
+            "soft_hard_ratio",
+            "effective_mod_ratio",
+            "curricular_t",
+        ):
+            row[key] = ep.get(key)
         for name, item in evals.items():
             row[name] = item.get("accuracy")
             row[f"{name}_std"] = item.get("std")
@@ -496,9 +631,14 @@ for metrics_path in sorted((OUTPUT_ROOT / "soft_gated_lambda_sweep").glob("r18_s
         rows.append(row)
 
 df = pd.DataFrame(rows)
-display(df)
+try:
+    from IPython.display import display
 
-out_csv = "/kaggle/working/soft_gated_lambda_eval_by_epoch.csv"
+    display(df)
+except Exception:
+    print(df)
+
+out_csv = "/kaggle/working/proposed2_eval_by_epoch.csv"
 df.to_csv(out_csv, index=False)
 print("Saved:", out_csv)
 
@@ -510,28 +650,24 @@ except Exception as exc:
     print("Could not render download link:", exc)
 
 # %% [markdown]
-# ## Cell 8: Backup
-#
-# Zip the sweep outputs and include the exported CSV so they can be downloaded
-# or saved as a Kaggle version artifact. The cell also displays a direct
-# notebook download link for the zip.
+# ## Cell 9: Backup
 
 # %%
-zip_base = "/kaggle/working/soft_gated_lambda_sweep"
+zip_base = "/kaggle/working/proposed2_sweep"
 zip_path = Path(zip_base + ".zip")
 if zip_path.exists():
     zip_path.unlink()
 
-root = OUTPUT_ROOT / "soft_gated_lambda_sweep"
+root = OUTPUT_ROOT / "proposed2_sweep"
 if root.exists():
-    shutil.make_archive(zip_base, "zip", str(OUTPUT_ROOT), "soft_gated_lambda_sweep")
-    csv_path = Path("/kaggle/working/soft_gated_lambda_eval_by_epoch.csv")
+    shutil.make_archive(zip_base, "zip", str(OUTPUT_ROOT), "proposed2_sweep")
+    csv_path = Path("/kaggle/working/proposed2_eval_by_epoch.csv")
     if csv_path.exists():
         with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
             zf.write(csv_path, csv_path.name)
         print("Included CSV:", csv_path)
     else:
-        print("CSV not found. Run Cell 7 first:", csv_path)
+        print("CSV not found. Run Cell 8 first:", csv_path)
     print("Saved:", zip_path)
     print("Size MB:", zip_path.stat().st_size / 1024 / 1024)
     try:
@@ -543,4 +679,4 @@ if root.exists():
         print("Could not render notebook download link:", exc)
         print("Download path:", zip_path)
 else:
-    print("No sweep outputs yet:", root)
+    print("No proposed2 outputs yet:", root)
