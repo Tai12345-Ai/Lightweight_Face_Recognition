@@ -57,6 +57,10 @@ LOSS_STAT_KEYS = (
     "q_min",
     "q_max",
     "q_pos_mean",
+    "alpha_quality_floor",
+    "quality_alpha_mean",
+    "quality_alpha_min",
+    "quality_alpha_max",
     "lambda_i_mean",
     "lambda_i_max",
     "u_pos_mean",
@@ -94,6 +98,13 @@ def parse_args():
     parser.add_argument("--lambda_max", "--lambda-max", dest="lambda_max", type=float, default=0.3)
     parser.add_argument("--alpha_max", "--alpha-max", dest="alpha_max", type=float, default=0.5)
     parser.add_argument("--gate_gamma", "--gate-gamma", dest="gate_gamma", type=float, default=5.0)
+    parser.add_argument(
+        "--alpha_quality_floor",
+        "--alpha-quality-floor",
+        dest="alpha_quality_floor",
+        type=float,
+        default=0.5,
+    )
     parser.add_argument(
         "--lambda_warmup_epochs",
         "--lambda-warmup-epochs",
@@ -197,6 +208,14 @@ def parse_args():
     args = parser.parse_args()
     if args.loss == "soft_gated_ada_curricular" and args.lambda_gate is None:
         parser.error("--lambda_gate is required when --loss soft_gated_ada_curricular")
+    if (
+        args.loss != "adaptive_soft_gated_ada_curricular_v2"
+        and args.alpha_quality_floor != 0.5
+    ):
+        parser.error(
+            "--alpha_quality_floor is only valid when "
+            "--loss adaptive_soft_gated_ada_curricular_v2"
+        )
     return args
 
 
@@ -214,9 +233,10 @@ def experiment_dir(args) -> Path:
             f"_lmax_{float_tag(args.lambda_max)}"
             f"_amax_{float_tag(args.alpha_max)}"
             f"_gamma_{float_tag(args.gate_gamma)}"
+            f"_qfloor_{float_tag(args.alpha_quality_floor)}"
+            f"_blr_{float_tag(args.backbone_lr)}"
+            f"_hlr_{float_tag(args.head_lr)}"
         )
-        if getattr(args, "use_split_lr", False):
-            name += f"_blr_{float_tag(args.backbone_lr)}_hlr_{float_tag(args.head_lr)}"
         return Path(args.output_dir) / "proposed2_sweep" / name
 
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
@@ -227,6 +247,8 @@ def experiment_dir(args) -> Path:
 
 def json_safe_config(args, exp_dir: Path) -> Dict:
     config = vars(args).copy()
+    if args.loss != "adaptive_soft_gated_ada_curricular_v2":
+        config.pop("alpha_quality_floor", None)
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
     config["eval_dir"] = str(args.eval_dir) if args.eval_dir else None
@@ -324,7 +346,13 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
     float_keys = ["s", "m", "h"]
     if args.loss == "adaptive_soft_gated_ada_curricular_v2":
         float_keys.extend(
-            ["lambda_max", "alpha_max", "gate_gamma", "lambda_warmup_epochs"]
+            [
+                "lambda_max",
+                "alpha_max",
+                "gate_gamma",
+                "alpha_quality_floor",
+                "lambda_warmup_epochs",
+            ]
         )
     else:
         float_keys.append("lambda_gate")
@@ -440,6 +468,7 @@ def main():
             lambda_max=args.lambda_max,
             alpha_max=args.alpha_max,
             gate_gamma=args.gate_gamma,
+            alpha_quality_floor=args.alpha_quality_floor,
             lambda_warmup_epochs=args.lambda_warmup_epochs,
             t_alpha=args.t_alpha,
             curriculum_alpha=args.curriculum_alpha,
@@ -515,13 +544,15 @@ def main():
         logging.info(
             (
                 "Training loss=%s lambda_max=%.4f alpha_max=%.4f gate_gamma=%.4f "
-                "lambda_warmup_epochs=%.3f backbone=%s classes=%d images=%d "
+                "alpha_quality_floor=%.4f lambda_warmup_epochs=%.3f "
+                "backbone=%s classes=%d images=%d "
                 "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
             ),
             args.loss,
             args.lambda_max,
             args.alpha_max,
             args.gate_gamma,
+            args.alpha_quality_floor,
             args.lambda_warmup_epochs,
             args.backbone,
             num_classes,
@@ -654,6 +685,11 @@ def main():
                     "lambda_max": args.lambda_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
                     "alpha_max": args.alpha_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
                     "gate_gamma": args.gate_gamma if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+                    "alpha_quality_floor": (
+                        args.alpha_quality_floor
+                        if args.loss == "adaptive_soft_gated_ada_curricular_v2"
+                        else ""
+                    ),
                     "lambda_warmup_epochs": (
                         args.lambda_warmup_epochs
                         if args.loss == "adaptive_soft_gated_ada_curricular_v2"
@@ -773,6 +809,7 @@ def main():
                     "lambda_max": float(args.lambda_max),
                     "alpha_max": float(args.alpha_max),
                     "gate_gamma": float(args.gate_gamma),
+                    "alpha_quality_floor": float(args.alpha_quality_floor),
                     "lambda_warmup_epochs": float(args.lambda_warmup_epochs),
                 }
             )
@@ -795,6 +832,11 @@ def main():
             "lambda_max": args.lambda_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
             "alpha_max": args.alpha_max if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
             "gate_gamma": args.gate_gamma if args.loss == "adaptive_soft_gated_ada_curricular_v2" else "",
+            "alpha_quality_floor": (
+                args.alpha_quality_floor
+                if args.loss == "adaptive_soft_gated_ada_curricular_v2"
+                else ""
+            ),
             "lambda_warmup_epochs": (
                 args.lambda_warmup_epochs
                 if args.loss == "adaptive_soft_gated_ada_curricular_v2"

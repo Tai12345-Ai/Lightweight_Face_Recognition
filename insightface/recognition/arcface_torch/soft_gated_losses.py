@@ -158,6 +158,7 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
         lambda_max: float = 0.3,
         alpha_max: float = 0.5,
         gate_gamma: float = 5.0,
+        alpha_quality_floor: float = 0.5,
         lambda_warmup_epochs: float = 2.0,
         t_alpha: float = 0.01,
         curriculum_alpha: float = 0.99,
@@ -170,6 +171,8 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
             raise ValueError("alpha_max must be non-negative.")
         if gate_gamma < 0.0:
             raise ValueError("gate_gamma must be non-negative.")
+        if not 0.0 <= alpha_quality_floor <= 1.0:
+            raise ValueError("alpha_quality_floor must be in [0, 1].")
         if lambda_warmup_epochs < 0.0:
             raise ValueError("lambda_warmup_epochs must be non-negative.")
         self.s = s
@@ -178,6 +181,7 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
         self.lambda_max = lambda_max
         self.alpha_max = alpha_max
         self.gate_gamma = gate_gamma
+        self.alpha_quality_floor = alpha_quality_floor
         self.lambda_warmup_epochs = lambda_warmup_epochs
         self.t_alpha = t_alpha
         self.curriculum_alpha = curriculum_alpha
@@ -256,10 +260,14 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
         d_gate = torch.sigmoid(
             self.gate_gamma * (rows.detach() - tau.view(-1, 1))
         ).detach()
+        quality_alpha = (
+            self.alpha_quality_floor
+            + (1.0 - self.alpha_quality_floor) * q_pos
+        ).detach()
         alpha = (
             self.alpha_max
             * rho
-            * q_pos.detach().view(-1, 1)
+            * quality_alpha.view(-1, 1)
             * d_gate
         ).detach()
 
@@ -273,6 +281,7 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
         with torch.no_grad():
             q_float = q.detach().float()
             q_pos_float = q_pos.detach().float()
+            quality_alpha_float = quality_alpha.detach().float()
             lambda_float = lambda_i.detach().float()
             d_neg = d_gate.masked_select(negative_mask).detach().float()
             alpha_neg = alpha.masked_select(negative_mask).detach().float()
@@ -295,6 +304,10 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
                 "q_min": float(q_float.min().item()),
                 "q_max": float(q_float.max().item()),
                 "q_pos_mean": float(q_pos_float.mean().item()),
+                "alpha_quality_floor": float(self.alpha_quality_floor),
+                "quality_alpha_mean": float(quality_alpha_float.mean().item()),
+                "quality_alpha_min": float(quality_alpha_float.min().item()),
+                "quality_alpha_max": float(quality_alpha_float.max().item()),
                 "lambda_i_mean": float(lambda_float.mean().item()),
                 "lambda_i_max": float(lambda_float.max().item()),
                 "u_pos_mean": float(u_pos.detach().float().mean().item()),

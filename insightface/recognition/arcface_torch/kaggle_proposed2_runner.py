@@ -264,6 +264,7 @@ LAMBDA_WARMUP_EPOCHS = 2.0
 DEBUG_LAMBDA_MAX = 0.3
 DEBUG_ALPHA_MAX = 0.5
 DEBUG_GATE_GAMMA = 5.0
+DEBUG_ALPHA_QUALITY_FLOOR = 0.5
 DEBUG_BATCH_SIZE = min(8, BATCH_SIZE)
 
 use_amp = bool(USE_FP16 and device.type == "cuda")
@@ -280,6 +281,7 @@ debug_margin_loss = AdaptiveSoftGatedAdaCurricularFaceV2Loss(
     lambda_max=DEBUG_LAMBDA_MAX,
     alpha_max=DEBUG_ALPHA_MAX,
     gate_gamma=DEBUG_GATE_GAMMA,
+    alpha_quality_floor=DEBUG_ALPHA_QUALITY_FLOOR,
     lambda_warmup_epochs=LAMBDA_WARMUP_EPOCHS,
 )
 debug_margin_loss.set_epoch(1)
@@ -320,7 +322,11 @@ else:
 stats = debug_margin_loss.last_stats
 assert -1.0 <= stats["q_min"] <= 1.0, stats
 assert -1.0 <= stats["q_max"] <= 1.0, stats
+assert 0.0 <= max(stats["q_min"], 0.0) <= 1.0, stats
+assert 0.0 <= max(stats["q_max"], 0.0) <= 1.0, stats
 assert 0.0 <= stats["q_pos_mean"] <= 1.0, stats
+assert DEBUG_ALPHA_QUALITY_FLOOR <= stats["quality_alpha_min"] <= 1.0, stats
+assert DEBUG_ALPHA_QUALITY_FLOOR <= stats["quality_alpha_max"] <= 1.0, stats
 assert 0.0 <= stats["lambda_i_mean"] <= DEBUG_LAMBDA_MAX + 1e-6, stats
 assert 0.0 <= stats["lambda_i_max"] <= DEBUG_LAMBDA_MAX + 1e-6, stats
 assert 0.0 <= stats["D_mean"] <= 1.0, stats
@@ -352,9 +358,24 @@ MIN_TRAIN_MINUTES_TO_START = 2
 SWEEP_START_TIME = time.time()
 
 PROPOSED2_SWEEP = [
-    {"lambda_max": 0.3, "alpha_max": 0.5, "gate_gamma": 5.0},
-    {"lambda_max": 0.3, "alpha_max": 1.0, "gate_gamma": 5.0},
-    {"lambda_max": 0.3, "alpha_max": 0.5, "gate_gamma": 10.0},
+    {
+        "lambda_max": 0.3,
+        "alpha_max": 0.5,
+        "gate_gamma": 5.0,
+        "alpha_quality_floor": 0.5,
+    },
+    {
+        "lambda_max": 0.3,
+        "alpha_max": 1.0,
+        "gate_gamma": 5.0,
+        "alpha_quality_floor": 0.5,
+    },
+    {
+        "lambda_max": 0.3,
+        "alpha_max": 0.5,
+        "gate_gamma": 10.0,
+        "alpha_quality_floor": 0.5,
+    },
 ]
 
 
@@ -379,6 +400,7 @@ def exp_dir(config):
             f"_lmax_{float_tag(config['lambda_max'])}"
             f"_amax_{float_tag(config['alpha_max'])}"
             f"_gamma_{float_tag(config['gate_gamma'])}"
+            f"_qfloor_{float_tag(config['alpha_quality_floor'])}"
             f"_blr_{float_tag(BACKBONE_LR)}"
             f"_hlr_{float_tag(HEAD_LR)}"
         )
@@ -431,6 +453,8 @@ for config in PROPOSED2_SWEEP:
         str(config["alpha_max"]),
         "--gate_gamma",
         str(config["gate_gamma"]),
+        "--alpha_quality_floor",
+        str(config["alpha_quality_floor"]),
         "--lambda_warmup_epochs",
         str(LAMBDA_WARMUP_EPOCHS),
         "--train_data",
@@ -473,6 +497,7 @@ for config in PROPOSED2_SWEEP:
         "[BUDGET] "
         f"lambda_max={config['lambda_max']} alpha_max={config['alpha_max']} "
         f"gate_gamma={config['gate_gamma']} "
+        f"alpha_quality_floor={config['alpha_quality_floor']} "
         f"remaining_sweep_train_minutes={train_minutes_left:.1f}"
     )
 
@@ -590,6 +615,7 @@ for metrics_path in sorted((OUTPUT_ROOT / "proposed2_sweep").glob("r18_proposed2
             "lambda_max": ep.get("lambda_max"),
             "alpha_max": ep.get("alpha_max"),
             "gate_gamma": ep.get("gate_gamma"),
+            "alpha_quality_floor": ep.get("alpha_quality_floor"),
             "lambda_warmup_epochs": ep.get("lambda_warmup_epochs"),
             "HQ_Avg": group_eval.get(
                 "HQ_Avg",
@@ -610,6 +636,10 @@ for metrics_path in sorted((OUTPUT_ROOT / "proposed2_sweep").glob("r18_proposed2
             "q_min",
             "q_max",
             "q_pos_mean",
+            "alpha_quality_floor",
+            "quality_alpha_mean",
+            "quality_alpha_min",
+            "quality_alpha_max",
             "lambda_i_mean",
             "lambda_i_max",
             "u_pos_mean",
