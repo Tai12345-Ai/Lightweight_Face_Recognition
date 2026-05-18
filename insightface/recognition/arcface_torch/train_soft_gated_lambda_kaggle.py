@@ -22,6 +22,7 @@ from backbones import get_model
 from soft_gated_losses import (
     AdaptiveSoftGatedAdaCurricularFaceV2Loss,
     CompetitionAwareAdaFaceLoss,
+    CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss,
     SoftGatedAdaCurricularFaceLoss,
 )
 from train_phase2_kaggle import (
@@ -100,6 +101,7 @@ def parse_args():
             "soft_gated_ada_curricular",
             "adaptive_soft_gated_ada_curricular_v2",
             "competition_aware_adaface",
+            "competition_adaptive_soft_gated_ada_curricular",
         ],
         help="Standalone loss name for config compatibility.",
     )
@@ -258,6 +260,13 @@ def experiment_dir(args) -> Path:
             f"_hlr_{float_tag(args.head_lr)}"
         )
         return Path(args.output_dir) / "proposed3_competition_aware_adaface" / name
+    if args.loss == "competition_adaptive_soft_gated_ada_curricular":
+        name = (
+            f"{args.backbone}_proposed4_comp_adaptive_soft_gated_ada_curricular"
+            f"_blr_{float_tag(args.backbone_lr)}"
+            f"_hlr_{float_tag(args.head_lr)}"
+        )
+        return Path(args.output_dir) / "proposed4_competition_adaptive" / name
 
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
     if getattr(args, "use_split_lr", False):
@@ -374,6 +383,8 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
                 "lambda_warmup_epochs",
             ]
         )
+    elif args.loss == "competition_adaptive_soft_gated_ada_curricular":
+        float_keys.extend(["t_alpha", "curriculum_alpha", "eps"])
     else:
         float_keys.append("lambda_gate")
 
@@ -502,6 +513,15 @@ def main():
             t_alpha=args.t_alpha,
             eps=args.eps,
         )
+    elif args.loss == "competition_adaptive_soft_gated_ada_curricular":
+        margin_loss = CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            t_alpha=args.t_alpha,
+            curriculum_alpha=args.curriculum_alpha,
+            eps=args.eps,
+        )
     else:
         margin_loss = SoftGatedAdaCurricularFaceLoss(
             s=args.s,
@@ -590,7 +610,10 @@ def main():
             args.backbone_lr,
             args.head_lr,
         )
-    elif args.loss == "competition_aware_adaface":
+    elif args.loss in (
+        "competition_aware_adaface",
+        "competition_adaptive_soft_gated_ada_curricular",
+    ):
         logging.info(
             (
                 "Training loss=%s backbone=%s classes=%d images=%d "

@@ -1,8 +1,8 @@
 # %% [markdown]
-# # Proposed 3 Competition-Aware AdaFace Runner
+# # Proposed 4 Competition-Adaptive Soft-Gated Ada-CurricularFace Runner
 #
 # Standalone Kaggle runner for:
-# `competition_aware_adaface`
+# `competition_adaptive_soft_gated_ada_curricular`
 #
 # It trains on:
 # `/kaggle/input/CASIA-WebFace/casia-webface`
@@ -13,6 +13,7 @@
 # %%
 from pathlib import Path
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -31,6 +32,7 @@ TRAIN_DATA_DIR = Path("/kaggle/input/CASIA-WebFace/casia-webface")
 EVAL_DIR = Path("/kaggle/input/CASIA-WebFace/eval")
 PRETRAINED_BACKBONE = Path("/kaggle/input/backbone/backbone.pth")
 OUTPUT_ROOT = Path("/kaggle/working/experiments")
+SWEEP_FOLDER = "proposed4_competition_adaptive"
 
 EVAL_TARGETS = [
     "lfw",
@@ -81,6 +83,16 @@ def detect_num_classes(train_dir, default=10575):
 def float_tag(value):
     text = f"{float(value):.6g}"
     return text.replace("-", "m").replace(".", "p")
+
+
+def complete_accuracy_mean(eval_metrics, targets):
+    values = []
+    for target in targets:
+        item = eval_metrics.get(target)
+        if item is None or "accuracy" not in item:
+            return None
+        values.append(float(item["accuracy"]))
+    return float(sum(values) / len(values)) if values else None
 
 
 if not CODE_ROOT.exists():
@@ -160,25 +172,25 @@ print("NUM_CLASSES:", NUM_CLASSES)
 # ## Restore Previous Outputs
 
 # %%
-SWEEP_ROOT = OUTPUT_ROOT / "proposed3_competition_aware_adaface"
+SWEEP_ROOT = OUTPUT_ROOT / SWEEP_FOLDER
 restored = False
 
-for zip_candidate in sorted(Path("/kaggle/input").rglob("proposed3_competition_aware_adaface.zip")):
-    print("Restoring previous proposed3 zip:", zip_candidate)
+for zip_candidate in sorted(Path("/kaggle/input").rglob(f"{SWEEP_FOLDER}.zip")):
+    print("Restoring previous proposed4 zip:", zip_candidate)
     with zipfile.ZipFile(zip_candidate, "r") as f:
         f.extractall(OUTPUT_ROOT)
     restored = True
     break
 
 if not restored:
-    for folder_candidate in sorted(Path("/kaggle/input").rglob("proposed3_competition_aware_adaface")):
+    for folder_candidate in sorted(Path("/kaggle/input").rglob(SWEEP_FOLDER)):
         if folder_candidate.is_dir():
-            print("Restoring previous proposed3 folder:", folder_candidate)
+            print("Restoring previous proposed4 folder:", folder_candidate)
             shutil.copytree(folder_candidate, SWEEP_ROOT, dirs_exist_ok=True)
             restored = True
             break
 
-print("Restored previous proposed3 outputs to:" if restored else "No previous proposed3 output input found.", SWEEP_ROOT)
+print("Restored previous proposed4 outputs to:" if restored else "No previous proposed4 output input found.", SWEEP_ROOT)
 
 # %% [markdown]
 # ## Preflight
@@ -189,8 +201,8 @@ compile_files = [
     "train_soft_gated_lambda_kaggle.py",
     "train_phase2_kaggle.py",
 ]
-if (ARCFACE_DIR / "kaggle_proposed3_runner.py").exists():
-    compile_files.append("kaggle_proposed3_runner.py")
+if (ARCFACE_DIR / "kaggle_proposed4_runner.py").exists():
+    compile_files.append("kaggle_proposed4_runner.py")
 
 run([sys.executable, "-m", "py_compile"] + compile_files, cwd=ARCFACE_DIR)
 
@@ -215,12 +227,12 @@ assert PRETRAINED_BACKBONE.exists(), f"Missing backbone: {PRETRAINED_BACKBONE}"
 
 # %%
 from backbones import get_model
-from soft_gated_losses import CompetitionAwareAdaFaceLoss
+from soft_gated_losses import CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss
 from train_phase2_kaggle import MarginSoftmaxHead, amp_autocast, make_grad_scaler
 
 BACKBONE = "r18"
-BACKBONE_LR = 2e-4
-HEAD_LR = 2e-3
+BACKBONE_LR = 1e-4
+HEAD_LR = 1e-3
 BATCH_SIZE = 128
 USE_FP16 = True
 
@@ -236,7 +248,7 @@ debug_backbone = get_model(
     fp16=use_amp,
     num_features=512,
 ).to(device)
-debug_margin_loss = CompetitionAwareAdaFaceLoss(s=S, m=M, h=H)
+debug_margin_loss = CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss(s=S, m=M, h=H)
 debug_head = MarginSoftmaxHead(
     embedding_size=512,
     num_classes=NUM_CLASSES,
@@ -276,8 +288,10 @@ assert -1.0 <= stats["q_min"] <= 1.0, stats
 assert -1.0 <= stats["q_max"] <= 1.0, stats
 assert 0.0 <= stats["d_mean"] <= 1.0, stats
 assert 0.0 <= stats["d_max"] <= 1.0, stats
-assert -1.0 <= stats["q_star_min"] <= 1.0, stats
-assert -1.0 <= stats["q_star_max"] <= 1.0, stats
+assert 0.0 <= stats["lambda_i_mean"] <= H + 1e-6, stats
+assert 0.0 <= stats["lambda_i_max"] <= H + 1e-6, stats
+assert math.isfinite(stats["tau_mean"]), stats
+assert 0.0 <= stats["hard_negative_ratio"] <= 1.0, stats
 
 print("debug_loss:", float(debug_loss.detach().cpu().item()))
 print("debug_logits_shape:", tuple(debug_logits.shape))
@@ -290,34 +304,41 @@ if device.type == "cuda":
     torch.cuda.empty_cache()
 
 # %% [markdown]
-# ## Train Proposed 3
+# ## Train Proposed 4
 
 # %%
-LOSS_NAME = "competition_aware_adaface"
+LOSS_NAME = "competition_adaptive_soft_gated_ada_curricular"
 EPOCHS = 10
 EVAL_EVERY = 1
 SAVE_EVERY_EPOCHS = 1
 SAVE_EVERY_STEPS = 300
 NUM_WORKERS = 2
-MAX_TRAIN_MINUTES = 480
+MAX_TRAIN_MINUTES = 600
 MIN_TRAIN_MINUTES_TO_START = 2
+RUN_OPTIONAL_2X_LR = False
 RUN_START_TIME = time.time()
 
+TRAIN_CONFIGS = [
+    {"backbone_lr": 1e-4, "head_lr": 1e-3},
+]
+if RUN_OPTIONAL_2X_LR:
+    TRAIN_CONFIGS.append({"backbone_lr": 2e-4, "head_lr": 2e-3})
 
-def exp_dir():
+
+def exp_dir(backbone_lr, head_lr):
     return (
         OUTPUT_ROOT
-        / "proposed3_competition_aware_adaface"
+        / SWEEP_FOLDER
         / (
-            f"{BACKBONE}_proposed3_competition_aware_adaface"
-            f"_blr_{float_tag(BACKBONE_LR)}"
-            f"_hlr_{float_tag(HEAD_LR)}"
+            f"{BACKBONE}_proposed4_comp_adaptive_soft_gated_ada_curricular"
+            f"_blr_{float_tag(backbone_lr)}"
+            f"_hlr_{float_tag(head_lr)}"
         )
     )
 
 
-def is_complete():
-    metrics_path = exp_dir() / "metrics.json"
+def is_complete(backbone_lr, head_lr):
+    metrics_path = exp_dir(backbone_lr, head_lr) / "metrics.json"
     if not metrics_path.exists():
         return False
     with open(metrics_path, "r", encoding="utf-8") as f:
@@ -336,15 +357,21 @@ print("Cell train NUM_CLASSES:", NUM_CLASSES)
 assert NUM_CLASSES < 100000, f"Bad NUM_CLASSES={NUM_CLASSES}"
 assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
 
-if is_complete():
-    print("[SKIP] proposed3 complete:", exp_dir())
-else:
+for cfg in TRAIN_CONFIGS:
+    backbone_lr = cfg["backbone_lr"]
+    head_lr = cfg["head_lr"]
+    current_exp_dir = exp_dir(backbone_lr, head_lr)
+
+    if is_complete(backbone_lr, head_lr):
+        print("[SKIP] proposed4 complete:", current_exp_dir)
+        continue
+
     train_minutes_left = remaining_train_minutes()
     assert (
         MAX_TRAIN_MINUTES <= 0 or train_minutes_left >= MIN_TRAIN_MINUTES_TO_START
     ), f"Not enough train time left: {train_minutes_left:.1f} minutes"
 
-    latest = exp_dir() / "latest.pt"
+    latest = current_exp_dir / "latest.pt"
     cmd = [
         sys.executable,
         "train_soft_gated_lambda_kaggle.py",
@@ -369,11 +396,11 @@ else:
         "--batch_size",
         str(BATCH_SIZE),
         "--lr",
-        str(HEAD_LR),
+        str(head_lr),
         "--backbone_lr",
-        str(BACKBONE_LR),
+        str(backbone_lr),
         "--head_lr",
-        str(HEAD_LR),
+        str(head_lr),
         "--warmup_epochs",
         "1.0",
         "--eval_every",
@@ -396,35 +423,25 @@ else:
 
     print(
         "[BUDGET] "
-        f"loss={LOSS_NAME} backbone_lr={BACKBONE_LR} head_lr={HEAD_LR} "
+        f"loss={LOSS_NAME} backbone_lr={backbone_lr} head_lr={head_lr} "
         f"remaining_train_minutes={train_minutes_left:.1f}"
     )
 
     if latest.exists():
-        print(f"[RESUME] proposed3 from {latest}")
+        print(f"[RESUME] proposed4 from {latest}")
         cmd.append("--resume")
     else:
-        print("[START] proposed3 from pretrained backbone")
+        print("[START] proposed4 from pretrained backbone")
         cmd.extend(["--pretrained_backbone", str(PRETRAINED_BACKBONE)])
 
     run(cmd, cwd=ARCFACE_DIR)
 
-print("Done. Proposed3 dir:", exp_dir())
+print("Done. Proposed4 root:", SWEEP_ROOT)
 
 # %% [markdown]
 # ## Progress And Best Scores
 
 # %%
-def complete_accuracy_mean(eval_metrics, targets):
-    values = []
-    for target in targets:
-        item = eval_metrics.get(target)
-        if item is None or "accuracy" not in item:
-            return None
-        values.append(float(item["accuracy"]))
-    return float(sum(values) / len(values)) if values else None
-
-
 def select_epoch_score(epoch_record):
     group_eval = epoch_record.get("group_eval", {}) or {}
     evals = epoch_record.get("eval", {}) or {}
@@ -441,8 +458,7 @@ def select_epoch_score(epoch_record):
     return None, None
 
 
-metrics_path = exp_dir() / "metrics.json"
-if metrics_path.exists():
+for metrics_path in sorted(SWEEP_ROOT.glob("*/metrics.json")):
     with open(metrics_path, "r", encoding="utf-8") as f:
         metrics = json.load(f)
     epochs = metrics.get("epochs", [])
@@ -457,15 +473,13 @@ if metrics_path.exists():
         ]
         if selected:
             best_epoch, best_score, best_metric = max(selected, key=lambda item: item[1])
-    print(exp_dir().name)
+    print(metrics_path.parent.name)
     print("  epochs:", len(epochs))
-    print("  latest:", (exp_dir() / "latest.pt").exists())
-    print("  best:", (exp_dir() / "best.pth").exists())
+    print("  latest:", (metrics_path.parent / "latest.pt").exists())
+    print("  best:", (metrics_path.parent / "best.pth").exists())
     print("  best_epoch:", best_epoch)
     print("  best_metric:", best_metric)
     print("  best_score:", best_score)
-else:
-    print("No metrics yet:", metrics_path)
 
 # %% [markdown]
 # ## Export Eval By Epoch
@@ -475,18 +489,17 @@ try:
     import pandas as pd
 
     rows = []
-    if metrics_path.exists():
+    for metrics_path in sorted(SWEEP_ROOT.glob("*/metrics.json")):
         with open(metrics_path, "r", encoding="utf-8") as f:
             metrics = json.load(f)
         for ep in metrics.get("epochs", []):
             evals = ep.get("eval", {}) or {}
             group_eval = ep.get("group_eval", {}) or {}
             row = {
-                "experiment": exp_dir().name,
+                "experiment": metrics_path.parent.name,
                 "epoch": ep.get("epoch"),
                 "loss": ep.get("loss"),
                 "mean_norm": ep.get("mean_norm"),
-                "lr": ep.get("lr"),
                 "backbone_lr": ep.get("backbone_lr"),
                 "head_lr": ep.get("head_lr"),
                 "HQ_Avg": group_eval.get(
@@ -502,32 +515,63 @@ try:
                     complete_accuracy_mean(evals, EVAL_TARGETS),
                 ),
             }
+            for name in EVAL_TARGETS:
+                item = evals.get(name, {}) or {}
+                row[name] = item.get("accuracy")
             for key in (
                 "q_mean",
                 "q_std",
                 "q_min",
                 "q_max",
+                "u_pos_mean",
+                "arc_anchor_mean",
+                "c_minus_mean",
                 "d_mean",
                 "d_max",
-                "q_star_mean",
-                "q_star_std",
-                "q_star_min",
-                "q_star_max",
-                "c_minus_mean",
-                "arc_anchor_mean",
-                "u_pos_star_mean",
+                "lambda_i_mean",
+                "lambda_i_max",
+                "tau_mean",
+                "hard_negative_ratio",
                 "competition_active_ratio",
-                "high_quality_hard_ratio",
-                "low_quality_hard_ratio",
+                "curricular_t",
             ):
                 row[key] = ep.get(key)
-            for name, item in evals.items():
-                row[name] = item.get("accuracy")
-                row[f"{name}_std"] = item.get("std")
-                row[f"{name}_xnorm"] = item.get("xnorm")
             rows.append(row)
 
-    df = pd.DataFrame(rows)
+    columns = [
+        "experiment",
+        "epoch",
+        "loss",
+        "mean_norm",
+        "backbone_lr",
+        "head_lr",
+        "HQ_Avg",
+        "LQ_Avg",
+        "Eval7_Avg",
+        "lfw",
+        "cfp_fp",
+        "cplfw",
+        "agedb_30",
+        "calfw",
+        "sllfw",
+        "talfw",
+        "q_mean",
+        "q_std",
+        "q_min",
+        "q_max",
+        "u_pos_mean",
+        "arc_anchor_mean",
+        "c_minus_mean",
+        "d_mean",
+        "d_max",
+        "lambda_i_mean",
+        "lambda_i_max",
+        "tau_mean",
+        "hard_negative_ratio",
+        "competition_active_ratio",
+        "curricular_t",
+    ]
+    df = pd.DataFrame(rows, columns=columns)
     try:
         from IPython.display import display
 
@@ -535,25 +579,24 @@ try:
     except Exception:
         print(df)
 
-    out_csv = "/kaggle/working/proposed3_eval_by_epoch.csv"
+    out_csv = "/kaggle/working/proposed4_eval_by_epoch.csv"
     df.to_csv(out_csv, index=False)
     print("Saved:", out_csv)
 except Exception as exc:
-    print("Could not export proposed3 CSV:", exc)
+    print("Could not export proposed4 CSV:", exc)
 
 # %% [markdown]
 # ## Backup
 
 # %%
-zip_base = "/kaggle/working/proposed3_competition_aware_adaface"
+zip_base = f"/kaggle/working/{SWEEP_FOLDER}"
 zip_path = Path(zip_base + ".zip")
 if zip_path.exists():
     zip_path.unlink()
 
-root = OUTPUT_ROOT / "proposed3_competition_aware_adaface"
-if root.exists():
-    shutil.make_archive(zip_base, "zip", str(OUTPUT_ROOT), "proposed3_competition_aware_adaface")
-    csv_path = Path("/kaggle/working/proposed3_eval_by_epoch.csv")
+if SWEEP_ROOT.exists():
+    shutil.make_archive(zip_base, "zip", str(OUTPUT_ROOT), SWEEP_FOLDER)
+    csv_path = Path("/kaggle/working/proposed4_eval_by_epoch.csv")
     if csv_path.exists():
         with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
             zf.write(csv_path, csv_path.name)
@@ -569,4 +612,4 @@ if root.exists():
         print("Could not render notebook download link:", exc)
         print("Download path:", zip_path)
 else:
-    print("No proposed3 outputs yet:", root)
+    print("No proposed4 outputs yet:", SWEEP_ROOT)
