@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from backbones import get_model
 from soft_gated_losses import (
     AdaptiveSoftGatedAdaCurricularFaceV2Loss,
+    CompetitionAwareAdaFaceLoss,
     SoftGatedAdaCurricularFaceLoss,
 )
 from train_phase2_kaggle import (
@@ -56,6 +57,17 @@ LOSS_STAT_KEYS = (
     "q_std",
     "q_min",
     "q_max",
+    "d_mean",
+    "d_max",
+    "q_star_mean",
+    "q_star_std",
+    "q_star_min",
+    "q_star_max",
+    "c_minus_mean",
+    "u_pos_star_mean",
+    "competition_active_ratio",
+    "high_quality_hard_ratio",
+    "low_quality_hard_ratio",
     "q_pos_mean",
     "alpha_quality_floor",
     "quality_alpha_mean",
@@ -87,6 +99,7 @@ def parse_args():
         choices=[
             "soft_gated_ada_curricular",
             "adaptive_soft_gated_ada_curricular_v2",
+            "competition_aware_adaface",
         ],
         help="Standalone loss name for config compatibility.",
     )
@@ -238,6 +251,13 @@ def experiment_dir(args) -> Path:
             f"_hlr_{float_tag(args.head_lr)}"
         )
         return Path(args.output_dir) / "proposed2_sweep" / name
+    if args.loss == "competition_aware_adaface":
+        name = (
+            f"{args.backbone}_proposed3_competition_aware_adaface"
+            f"_blr_{float_tag(args.backbone_lr)}"
+            f"_hlr_{float_tag(args.head_lr)}"
+        )
+        return Path(args.output_dir) / "proposed3_competition_aware_adaface" / name
 
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
     if getattr(args, "use_split_lr", False):
@@ -474,6 +494,14 @@ def main():
             curriculum_alpha=args.curriculum_alpha,
             eps=args.eps,
         )
+    elif args.loss == "competition_aware_adaface":
+        margin_loss = CompetitionAwareAdaFaceLoss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            t_alpha=args.t_alpha,
+            eps=args.eps,
+        )
     else:
         margin_loss = SoftGatedAdaCurricularFaceLoss(
             s=args.s,
@@ -554,6 +582,21 @@ def main():
             args.gate_gamma,
             args.alpha_quality_floor,
             args.lambda_warmup_epochs,
+            args.backbone,
+            num_classes,
+            len(dataset),
+            args.batch_size,
+            args.lr,
+            args.backbone_lr,
+            args.head_lr,
+        )
+    elif args.loss == "competition_aware_adaface":
+        logging.info(
+            (
+                "Training loss=%s backbone=%s classes=%d images=%d "
+                "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
+            ),
+            args.loss,
             args.backbone,
             num_classes,
             len(dataset),

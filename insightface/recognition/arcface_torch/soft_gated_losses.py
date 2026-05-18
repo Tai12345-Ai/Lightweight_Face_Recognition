@@ -322,3 +322,112 @@ class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
                 "curricular_t": float(self.t.detach().item()),
             }
         return logits * self.s
+
+
+class CompetitionAwareAdaFaceLoss(nn.Module):
+    """AdaFace positive margin refined by detached negative competition.
+
+    Negative logits are not modified. The hardest negative only adjusts the
+    detached quality scalar used by the AdaFace positive branch.
+    """
+
+    requires_norms = True
+    requires_embeddings = False
+
+    def __init__(
+        self,
+        s: float = 64.0,
+        m: float = 0.4,
+        h: float = 0.333,
+        t_alpha: float = 0.01,
+        eps: float = 1e-3,
+    ):
+        super().__init__()
+        self.s = s
+        self.m = m
+        self.h = h
+        self.t_alpha = t_alpha
+        self.eps = eps
+        self.last_stats = {}
+        self.register_buffer("batch_mean", torch.ones(1) * 20.0)
+        self.register_buffer("batch_std", torch.ones(1) * 100.0)
+
+    def _quality_indicator(self, labels: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        index, _ = _positive_indices(labels)
+        safe_norms = norms.view(-1, 1).clamp(min=0.001, max=100.0).detach()
+
+        with torch.no_grad():
+            positive_norms = safe_norms[index]
+            if positive_norms.numel() > 1:
+                batch_mean = positive_norms.mean()
+                batch_std = positive_norms.std(unbiased=False).clamp_min(self.eps)
+                self.batch_mean.mul_(1.0 - self.t_alpha).add_(batch_mean * self.t_alpha)
+                self.batch_std.mul_(1.0 - self.t_alpha).add_(batch_std * self.t_alpha)
+
+        q = (safe_norms[index].view(-1) - self.batch_mean) / (
+            self.batch_std + self.eps
+        )
+        return (q * self.h).clamp(-1.0, 1.0).detach()
+
+    def forward(self, logits, labels, embeddings=None, norms=None):
+        if norms is None:
+            raise RuntimeError("CompetitionAwareAdaFaceLoss requires feature norms.")
+
+        index, target = _positive_indices(labels)
+        logits = logits.clone()
+        if index.numel() == 0:
+            self.last_stats = {}
+            return logits * self.s
+
+        rows = logits[index].clone()
+        q = self._quality_indicator(labels, norms).to(dtype=rows.dtype)
+        target_cos = _safe_cosine(
+            rows.gather(1, target.view(-1, 1)).view(-1), eps=self.eps
+        )
+        theta_y = target_cos.acos()
+        arc_anchor = torch.cos(theta_y + self.m).to(dtype=rows.dtype)
+
+        one_hot = torch.zeros_like(rows, dtype=torch.bool)
+        one_hot.scatter_(1, target.view(-1, 1), True)
+        c_minus = rows.detach().masked_fill(one_hot, -1.0).max(dim=1).values
+        d_i = (
+            (c_minus - arc_anchor.detach()).relu()
+            / (1.0 - arc_anchor.detach() + self.eps)
+        ).clamp(0.0, 1.0).detach()
+
+        q_star = (q * (1.0 + d_i)).clamp(-1.0, 1.0).detach()
+        u_pos_star = torch.cos(theta_y - self.m * q_star)
+        u_pos_star = (u_pos_star - (self.m * q_star + self.m)).to(dtype=rows.dtype)
+
+        rows = rows.scatter(1, target.view(-1, 1), u_pos_star.view(-1, 1))
+        logits[index] = rows
+
+        with torch.no_grad():
+            q_float = q.detach().float()
+            d_float = d_i.detach().float()
+            q_star_float = q_star.detach().float()
+            c_minus_float = c_minus.detach().float()
+            hard_mask = d_float > 0.0
+            high_quality_hard = (q_float > 0.0) & hard_mask
+            low_quality_hard = (q_float < 0.0) & hard_mask
+            self.last_stats = {
+                "q_mean": float(q_float.mean().item()),
+                "q_std": float(q_float.std(unbiased=False).item()),
+                "q_min": float(q_float.min().item()),
+                "q_max": float(q_float.max().item()),
+                "d_mean": float(d_float.mean().item()),
+                "d_max": float(d_float.max().item()),
+                "q_star_mean": float(q_star_float.mean().item()),
+                "q_star_std": float(q_star_float.std(unbiased=False).item()),
+                "q_star_min": float(q_star_float.min().item()),
+                "q_star_max": float(q_star_float.max().item()),
+                "c_minus_mean": float(c_minus_float.mean().item()),
+                "arc_anchor_mean": float(arc_anchor.detach().float().mean().item()),
+                "u_pos_star_mean": float(u_pos_star.detach().float().mean().item()),
+                "competition_active_ratio": float(hard_mask.float().mean().item()),
+                "high_quality_hard_ratio": float(
+                    high_quality_hard.float().mean().item()
+                ),
+                "low_quality_hard_ratio": float(low_quality_hard.float().mean().item()),
+            }
+        return logits * self.s
