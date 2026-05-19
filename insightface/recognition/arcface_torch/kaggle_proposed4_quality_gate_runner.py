@@ -1,14 +1,14 @@
 # %% [markdown]
-# # Proposed 4 Competition-Adaptive Soft-Gated Ada-CurricularFace Runner
+# # Proposed 4.1 Quality-Gated Competition-Adaptive Soft-Gated Ada-CurricularFace Runner
 #
 # Standalone Kaggle runner for:
-# `competition_adaptive_soft_gated_ada_curricular`
+# `competition_quality_adaptive_soft_gated_ada_curricular`
 #
 # It trains on:
 # `/kaggle/input/CASIA-WebFace/casia-webface`
 #
 # It resumes from previous outputs when a Kaggle dataset contains:
-# `/kaggle/input/proposed/proposed4_competition_adaptive`
+# `/kaggle/input/proposed/proposed4_quality_gate`
 
 # %%
 from pathlib import Path
@@ -33,7 +33,7 @@ TRAIN_DATA_DIR = INPUT_ROOT / "CASIA-WebFace" / "casia-webface"
 EVAL_DIR = INPUT_ROOT / "CASIA-WebFace" / "eval"
 PRETRAINED_BACKBONE = INPUT_ROOT / "backbone" / "backbone.pth"
 OUTPUT_ROOT = Path("/kaggle/working/experiments")
-SWEEP_FOLDER = "proposed4_competition_adaptive"
+SWEEP_FOLDER = "proposed4_quality_gate"
 
 EVAL_TARGETS = [
     "lfw",
@@ -121,11 +121,10 @@ def has_train_data(path):
 
 def normalize_train_data_dir(path):
     path = Path(path)
-    for name in ("webface_112x112", "casia-webface"):
-        nested_train = path / name
-        if has_train_data(nested_train):
-            print("Detected nested train layout. Using train folder:", nested_train)
-            return nested_train
+    nested_train = path / "casia-webface"
+    if has_train_data(nested_train):
+        print("Detected nested CASIA-WebFace layout. Using train folder:", nested_train)
+        return nested_train
     return path
 
 
@@ -133,15 +132,12 @@ def resolve_train_data_dir(preferred):
     preferred_paths = [
         preferred,
         INPUT_ROOT / "CASIA-WebFace" / "casia-webface",
-        INPUT_ROOT / "webface-112x112" / "webface_112x112",
-        INPUT_ROOT / "WebFace 112x112" / "webface_112x112",
+        INPUT_ROOT / "CASIA-WebFace",
     ]
 
     candidates = []
     for path in preferred_paths:
         candidates.append(path)
-        candidates.append(Path(path).parent)
-    candidates.extend(input_dirs(max_depth=2))
 
     for candidate in unique_existing(candidates):
         normalized = normalize_train_data_dir(candidate)
@@ -149,19 +145,16 @@ def resolve_train_data_dir(preferred):
             return normalized
 
     raise FileNotFoundError(
-        "Could not find WebFace/CASIA train data under /kaggle/input. "
-        "Expected a folder containing train.rec/train.idx or ImageFolder class folders."
+        "Could not find CASIA-WebFace train data. Expected "
+        "/kaggle/input/CASIA-WebFace/casia-webface with train.rec/train.idx."
     )
 
 
 def resolve_eval_dir(train_dir):
     candidates = [
-        Path(train_dir) / "eval",
         Path(train_dir).parent / "eval",
-        INPUT_ROOT / "webface-112x112" / "eval",
         INPUT_ROOT / "CASIA-WebFace" / "eval",
     ]
-    candidates.extend(input_dirs(max_depth=2))
 
     for candidate in unique_existing(candidates):
         if any((candidate / f"{name}.bin").exists() for name in EVAL_TARGETS):
@@ -312,7 +305,7 @@ folder_candidates = sorted(
 )
 
 for zip_candidate in zip_candidates:
-    print("Restoring previous proposed4 zip:", zip_candidate)
+    print("Restoring previous proposed4 quality gate zip:", zip_candidate)
     with zipfile.ZipFile(zip_candidate, "r") as f:
         f.extractall(OUTPUT_ROOT)
     restored = True
@@ -320,18 +313,23 @@ for zip_candidate in zip_candidates:
 
 if not restored:
     for folder_candidate in folder_candidates:
-        print("Restoring previous proposed4 folder:", folder_candidate)
+        print("Restoring previous proposed4 quality gate folder:", folder_candidate)
         shutil.copytree(folder_candidate, SWEEP_ROOT, dirs_exist_ok=True)
         restored = True
         break
 
-for csv_candidate in input_file_candidates("proposed4_eval_by_epoch.csv", max_depth=1):
-    csv_dst = Path("/kaggle/working/proposed4_eval_by_epoch.csv")
+for csv_candidate in input_file_candidates("proposed4_quality_gate_eval_by_epoch.csv", max_depth=1):
+    csv_dst = Path("/kaggle/working/proposed4_quality_gate_eval_by_epoch.csv")
     shutil.copy2(csv_candidate, csv_dst)
-    print("Restored previous proposed4 CSV:", csv_candidate, "->", csv_dst)
+    print("Restored previous proposed4 quality gate CSV:", csv_candidate, "->", csv_dst)
     break
 
-print("Restored previous proposed4 outputs to:" if restored else "No previous proposed4 output input found.", SWEEP_ROOT)
+print(
+    "Restored previous proposed4 quality gate outputs to:"
+    if restored
+    else "No previous proposed4 quality gate output input found.",
+    SWEEP_ROOT,
+)
 
 # %% [markdown]
 # ## Preflight
@@ -342,8 +340,8 @@ compile_files = [
     "train_soft_gated_lambda_kaggle.py",
     "train_phase2_kaggle.py",
 ]
-if (ARCFACE_DIR / "kaggle_proposed4_runner.py").exists():
-    compile_files.append("kaggle_proposed4_runner.py")
+if (ARCFACE_DIR / "kaggle_proposed4_quality_gate_runner.py").exists():
+    compile_files.append("kaggle_proposed4_quality_gate_runner.py")
 
 run([sys.executable, "-m", "py_compile"] + compile_files, cwd=ARCFACE_DIR)
 
@@ -368,7 +366,7 @@ assert PRETRAINED_BACKBONE.exists(), f"Missing backbone: {PRETRAINED_BACKBONE}"
 
 # %%
 from backbones import get_model
-from soft_gated_losses import CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss
+from soft_gated_losses import CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss
 from train_phase2_kaggle import MarginSoftmaxHead, amp_autocast, make_grad_scaler
 
 BACKBONE = "r18"
@@ -389,7 +387,7 @@ debug_backbone = get_model(
     fp16=use_amp,
     num_features=512,
 ).to(device)
-debug_margin_loss = CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss(s=S, m=M, h=H)
+debug_margin_loss = CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(s=S, m=M, h=H)
 debug_head = MarginSoftmaxHead(
     embedding_size=512,
     num_classes=NUM_CLASSES,
@@ -429,6 +427,8 @@ assert -1.0 <= stats["q_min"] <= 1.0, stats
 assert -1.0 <= stats["q_max"] <= 1.0, stats
 assert 0.0 <= stats["d_mean"] <= 1.0, stats
 assert 0.0 <= stats["d_max"] <= 1.0, stats
+assert 0.75 <= stats["q_factor_min"] <= 1.0, stats
+assert 0.75 <= stats["q_factor_max"] <= 1.0, stats
 assert 0.0 <= stats["lambda_i_mean"] <= H + 1e-6, stats
 assert 0.0 <= stats["lambda_i_max"] <= H + 1e-6, stats
 assert math.isfinite(stats["tau_mean"]), stats
@@ -445,10 +445,10 @@ if device.type == "cuda":
     torch.cuda.empty_cache()
 
 # %% [markdown]
-# ## Train Proposed 4
+# ## Train Proposed 4.1 Quality Gate
 
 # %%
-LOSS_NAME = "competition_adaptive_soft_gated_ada_curricular"
+LOSS_NAME = "competition_quality_adaptive_soft_gated_ada_curricular"
 EPOCHS = 10
 EVAL_EVERY = 1
 SAVE_EVERY_EPOCHS = 1
@@ -471,7 +471,7 @@ def exp_dir(backbone_lr, head_lr):
         OUTPUT_ROOT
         / SWEEP_FOLDER
         / (
-            f"{BACKBONE}_proposed4_comp_adaptive_soft_gated_ada_curricular"
+            f"{BACKBONE}_proposed4_quality_gate_comp_adaptive_soft_gated_ada_curricular"
             f"_blr_{float_tag(backbone_lr)}"
             f"_hlr_{float_tag(head_lr)}"
         )
@@ -504,7 +504,7 @@ for cfg in TRAIN_CONFIGS:
     current_exp_dir = exp_dir(backbone_lr, head_lr)
 
     if is_complete(backbone_lr, head_lr):
-        print("[SKIP] proposed4 complete:", current_exp_dir)
+        print("[SKIP] proposed4 quality gate complete:", current_exp_dir)
         continue
 
     train_minutes_left = remaining_train_minutes()
@@ -569,15 +569,15 @@ for cfg in TRAIN_CONFIGS:
     )
 
     if latest.exists():
-        print(f"[RESUME] proposed4 from {latest}")
+        print(f"[RESUME] proposed4 quality gate from {latest}")
         cmd.append("--resume")
     else:
-        print("[START] proposed4 from pretrained backbone")
+        print("[START] proposed4 quality gate from pretrained backbone")
         cmd.extend(["--pretrained_backbone", str(PRETRAINED_BACKBONE)])
 
     run(cmd, cwd=ARCFACE_DIR)
 
-print("Done. Proposed4 root:", SWEEP_ROOT)
+print("Done. Proposed4 quality gate root:", SWEEP_ROOT)
 
 # %% [markdown]
 # ## Progress And Best Scores
@@ -664,6 +664,10 @@ try:
                 "q_std",
                 "q_min",
                 "q_max",
+                "q_pos_mean",
+                "q_factor_mean",
+                "q_factor_min",
+                "q_factor_max",
                 "u_pos_mean",
                 "arc_anchor_mean",
                 "c_minus_mean",
@@ -674,6 +678,7 @@ try:
                 "tau_mean",
                 "hard_negative_ratio",
                 "competition_active_ratio",
+                "quality_modulated_lambda_ratio",
                 "curricular_t",
             ):
                 row[key] = ep.get(key)
@@ -700,6 +705,10 @@ try:
         "q_std",
         "q_min",
         "q_max",
+        "q_pos_mean",
+        "q_factor_mean",
+        "q_factor_min",
+        "q_factor_max",
         "u_pos_mean",
         "arc_anchor_mean",
         "c_minus_mean",
@@ -710,6 +719,7 @@ try:
         "tau_mean",
         "hard_negative_ratio",
         "competition_active_ratio",
+        "quality_modulated_lambda_ratio",
         "curricular_t",
     ]
     df = pd.DataFrame(rows, columns=columns)
@@ -720,17 +730,17 @@ try:
     except Exception:
         print(df)
 
-    out_csv = "/kaggle/working/proposed4_eval_by_epoch.csv"
+    out_csv = "/kaggle/working/proposed4_quality_gate_eval_by_epoch.csv"
     df.to_csv(out_csv, index=False)
     print("Saved:", out_csv)
 except Exception as exc:
-    print("Could not export proposed4 CSV:", exc)
+    print("Could not export proposed4 quality gate CSV:", exc)
 
 # %% [markdown]
 # ## Plot Eval Metrics
 
 # %%
-plot_path = Path("/kaggle/working/proposed4_eval_plot.png")
+plot_path = Path("/kaggle/working/proposed4_quality_gate_eval_plot.png")
 try:
     import matplotlib.pyplot as plt
 
@@ -755,7 +765,7 @@ try:
                     label=f"{experiment} {metric}",
                 )
 
-    ax.set_title("Proposed4 Eval Metrics by Epoch")
+    ax.set_title("Proposed4 Quality Gate Eval Metrics by Epoch")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Accuracy")
     ax.grid(True, alpha=0.3)
@@ -771,13 +781,13 @@ try:
     plt.close(fig)
     print("Saved plot:", plot_path)
 except Exception as exc:
-    print("Could not render proposed4 plot:", exc)
+    print("Could not render proposed4 quality gate plot:", exc)
 
 # %% [markdown]
 # ## Download Plot
 
 # %%
-plot_path = Path("/kaggle/working/proposed4_eval_plot.png")
+plot_path = Path("/kaggle/working/proposed4_quality_gate_eval_plot.png")
 if plot_path.exists():
     try:
         from IPython.display import FileLink, display
@@ -801,7 +811,7 @@ if zip_path.exists():
 
 if SWEEP_ROOT.exists():
     shutil.make_archive(zip_base, "zip", str(OUTPUT_ROOT), SWEEP_FOLDER)
-    csv_path = Path("/kaggle/working/proposed4_eval_by_epoch.csv")
+    csv_path = Path("/kaggle/working/proposed4_quality_gate_eval_by_epoch.csv")
     if csv_path.exists():
         with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
             zf.write(csv_path, csv_path.name)
@@ -817,4 +827,4 @@ if SWEEP_ROOT.exists():
         print("Could not render notebook download link:", exc)
         print("Download path:", zip_path)
 else:
-    print("No proposed4 outputs yet:", SWEEP_ROOT)
+    print("No proposed4 quality gate outputs yet:", SWEEP_ROOT)

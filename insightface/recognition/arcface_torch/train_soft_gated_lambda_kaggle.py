@@ -23,6 +23,7 @@ from soft_gated_losses import (
     AdaptiveSoftGatedAdaCurricularFaceV2Loss,
     CompetitionAwareAdaFaceLoss,
     CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss,
+    CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss,
     SoftGatedAdaCurricularFaceLoss,
 )
 from train_phase2_kaggle import (
@@ -70,6 +71,9 @@ LOSS_STAT_KEYS = (
     "high_quality_hard_ratio",
     "low_quality_hard_ratio",
     "q_pos_mean",
+    "q_factor_mean",
+    "q_factor_min",
+    "q_factor_max",
     "alpha_quality_floor",
     "quality_alpha_mean",
     "quality_alpha_min",
@@ -86,6 +90,7 @@ LOSS_STAT_KEYS = (
     "soft_hard_ratio",
     "effective_mod_ratio",
     "hard_negative_ratio",
+    "quality_modulated_lambda_ratio",
     "curricular_t",
 )
 
@@ -102,6 +107,8 @@ def parse_args():
             "adaptive_soft_gated_ada_curricular_v2",
             "competition_aware_adaface",
             "competition_adaptive_soft_gated_ada_curricular",
+            "competition_quality_adaptive_soft_gated_ada_curricular",
+            "proposed_4_quality_gate",
         ],
         help="Standalone loss name for config compatibility.",
     )
@@ -221,6 +228,8 @@ def parse_args():
     )
     parser.add_argument("--eps", type=float, default=1e-3)
     args = parser.parse_args()
+    if args.loss == "proposed_4_quality_gate":
+        args.loss = "competition_quality_adaptive_soft_gated_ada_curricular"
     if args.loss == "soft_gated_ada_curricular" and args.lambda_gate is None:
         parser.error("--lambda_gate is required when --loss soft_gated_ada_curricular")
     if (
@@ -267,6 +276,13 @@ def experiment_dir(args) -> Path:
             f"_hlr_{float_tag(args.head_lr)}"
         )
         return Path(args.output_dir) / "proposed4_competition_adaptive" / name
+    if args.loss == "competition_quality_adaptive_soft_gated_ada_curricular":
+        name = (
+            f"{args.backbone}_proposed4_quality_gate_comp_adaptive_soft_gated_ada_curricular"
+            f"_blr_{float_tag(args.backbone_lr)}"
+            f"_hlr_{float_tag(args.head_lr)}"
+        )
+        return Path(args.output_dir) / "proposed4_quality_gate" / name
 
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
     if getattr(args, "use_split_lr", False):
@@ -383,7 +399,10 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
                 "lambda_warmup_epochs",
             ]
         )
-    elif args.loss == "competition_adaptive_soft_gated_ada_curricular":
+    elif args.loss in (
+        "competition_adaptive_soft_gated_ada_curricular",
+        "competition_quality_adaptive_soft_gated_ada_curricular",
+    ):
         float_keys.extend(["t_alpha", "curriculum_alpha", "eps"])
     else:
         float_keys.append("lambda_gate")
@@ -522,6 +541,15 @@ def main():
             curriculum_alpha=args.curriculum_alpha,
             eps=args.eps,
         )
+    elif args.loss == "competition_quality_adaptive_soft_gated_ada_curricular":
+        margin_loss = CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            t_alpha=args.t_alpha,
+            curriculum_alpha=args.curriculum_alpha,
+            eps=args.eps,
+        )
     else:
         margin_loss = SoftGatedAdaCurricularFaceLoss(
             s=args.s,
@@ -613,6 +641,7 @@ def main():
     elif args.loss in (
         "competition_aware_adaface",
         "competition_adaptive_soft_gated_ada_curricular",
+        "competition_quality_adaptive_soft_gated_ada_curricular",
     ):
         logging.info(
             (

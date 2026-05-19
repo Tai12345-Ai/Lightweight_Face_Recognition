@@ -268,6 +268,146 @@ class CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss(nn.Module):
         return logits * self.s
 
 
+class CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(nn.Module):
+    """Proposed 4.1: quality-modulated competition-adaptive gate.
+
+    This is the Proposed 4 loss with a fixed, detached quality factor applied
+    to the competition gate:
+
+        lambda_i = h * d_i * (0.75 + 0.25 * clamp(q_i, 0, 1))
+    """
+
+    requires_norms = True
+    requires_embeddings = False
+
+    def __init__(
+        self,
+        s: float = 64.0,
+        m: float = 0.4,
+        h: float = 0.333,
+        t_alpha: float = 0.01,
+        curriculum_alpha: float = 0.99,
+        eps: float = 1e-3,
+    ):
+        super().__init__()
+        self.s = s
+        self.m = m
+        self.h = h
+        self.t_alpha = t_alpha
+        self.curriculum_alpha = curriculum_alpha
+        self.eps = eps
+        self.last_stats = {}
+        self.register_buffer("batch_mean", torch.ones(1) * 20.0)
+        self.register_buffer("batch_std", torch.ones(1) * 100.0)
+        self.register_buffer("t", torch.zeros(1))
+
+    def _quality_indicator(self, labels: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        index, _ = _positive_indices(labels)
+        safe_norms = norms.view(-1, 1).clamp(min=0.001, max=100.0).detach()
+
+        with torch.no_grad():
+            positive_norms = safe_norms[index]
+            if positive_norms.numel() > 1:
+                batch_mean = positive_norms.mean()
+                batch_std = positive_norms.std(unbiased=False).clamp_min(self.eps)
+                self.batch_mean.mul_(1.0 - self.t_alpha).add_(batch_mean * self.t_alpha)
+                self.batch_std.mul_(1.0 - self.t_alpha).add_(batch_std * self.t_alpha)
+
+        q = (safe_norms[index].view(-1) - self.batch_mean) / (
+            self.batch_std + self.eps
+        )
+        return (q * self.h).clamp(-1.0, 1.0).detach()
+
+    def forward(self, logits, labels, embeddings=None, norms=None):
+        if norms is None:
+            raise RuntimeError(
+                "CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss "
+                "requires feature norms."
+            )
+
+        index, target = _positive_indices(labels)
+        logits = logits.clone()
+        if index.numel() == 0:
+            self.last_stats = {}
+            return logits * self.s
+
+        rows = logits[index].clone()
+        q = self._quality_indicator(labels, norms).to(dtype=rows.dtype)
+
+        target_cos = _safe_cosine(
+            rows.gather(1, target.view(-1, 1)).view(-1), eps=self.eps
+        )
+        theta_y = target_cos.acos()
+
+        u_pos = torch.cos(theta_y - self.m * q)
+        u_pos = (u_pos - (self.m * q + self.m)).to(dtype=rows.dtype)
+        arc_anchor = torch.cos(theta_y + self.m).to(dtype=rows.dtype)
+
+        one_hot = torch.zeros_like(rows, dtype=torch.bool)
+        one_hot.scatter_(1, target.view(-1, 1), True)
+
+        c_minus = rows.detach().masked_fill(one_hot, -1.0).max(dim=1).values
+        d_i = (
+            (c_minus - arc_anchor.detach()).relu()
+            / (1.0 - arc_anchor.detach() + self.eps)
+        ).clamp(0.0, 1.0).detach()
+
+        q_pos = q.clamp(0.0, 1.0)
+        q_factor = (0.75 + 0.25 * q_pos).detach()
+        lambda_i = (self.h * d_i * q_factor).detach()
+        tau = (
+            (1.0 - lambda_i) * arc_anchor.detach()
+            + lambda_i * u_pos.detach()
+        ).detach()
+
+        with torch.no_grad():
+            self.t.mul_(self.curriculum_alpha).add_(
+                arc_anchor.detach().mean() * (1.0 - self.curriculum_alpha)
+            )
+
+        hard_mask = (rows > tau.view(-1, 1)) & (~one_hot)
+        total_negatives = (~one_hot).sum().clamp_min(1)
+        hard_negative_ratio = hard_mask.sum().float() / total_negatives.float()
+
+        t = self.t.to(dtype=rows.dtype)
+        rows = torch.where(hard_mask, rows * (t + rows), rows).to(dtype=rows.dtype)
+        rows.scatter_(1, target.view(-1, 1), u_pos.view(-1, 1))
+        logits[index] = rows
+
+        with torch.no_grad():
+            q_float = q.detach().float()
+            q_pos_float = q_pos.detach().float()
+            q_factor_float = q_factor.detach().float()
+            d_float = d_i.detach().float()
+            lambda_float = lambda_i.detach().float()
+            quality_ratio = lambda_i / (self.h * d_i + self.eps)
+            self.last_stats = {
+                "q_mean": float(q_float.mean().item()),
+                "q_std": float(q_float.std(unbiased=False).item()),
+                "q_min": float(q_float.min().item()),
+                "q_max": float(q_float.max().item()),
+                "q_pos_mean": float(q_pos_float.mean().item()),
+                "q_factor_mean": float(q_factor_float.mean().item()),
+                "q_factor_min": float(q_factor_float.min().item()),
+                "q_factor_max": float(q_factor_float.max().item()),
+                "u_pos_mean": float(u_pos.detach().float().mean().item()),
+                "arc_anchor_mean": float(arc_anchor.detach().float().mean().item()),
+                "c_minus_mean": float(c_minus.detach().float().mean().item()),
+                "d_mean": float(d_float.mean().item()),
+                "d_max": float(d_float.max().item()),
+                "lambda_i_mean": float(lambda_float.mean().item()),
+                "lambda_i_max": float(lambda_float.max().item()),
+                "tau_mean": float(tau.detach().float().mean().item()),
+                "hard_negative_ratio": float(hard_negative_ratio.item()),
+                "competition_active_ratio": float((d_float > 0.0).float().mean().item()),
+                "quality_modulated_lambda_ratio": float(
+                    quality_ratio.detach().float().mean().item()
+                ),
+                "curricular_t": float(self.t.detach().item()),
+            }
+        return logits * self.s
+
+
 class AdaptiveSoftGatedAdaCurricularFaceV2Loss(nn.Module):
     """AdaFace-positive, soft adaptive CurricularFace-negative loss.
 
