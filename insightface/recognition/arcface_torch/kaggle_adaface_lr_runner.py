@@ -175,6 +175,8 @@ run([
     sys.executable,
     "-m",
     "py_compile",
+    "degradation/transforms.py",
+    "eval_degraded_6phase2.py",
     "losses_extended.py",
     "train_phase2_kaggle.py",
     "eval_degraded_phase2.py",
@@ -226,6 +228,18 @@ MAX_TRAIN_MINUTES = 660
 MIN_TRAIN_MINUTES_TO_START = 2
 NUM_WORKERS = 2
 USE_FP16 = True
+RUN_DEGRADED_EVAL = True
+DEGRADED_TARGETS = ["lfw", "cfp_fp", "cplfw", "agedb_30", "calfw"]
+DEGRADED_DEGRADATIONS = [
+    "gaussian_blur",
+    "motion_blur",
+    "low_resolution",
+    "jpeg_compression",
+    "low_illumination",
+    "alignment_perturb",
+]
+DEGRADED_SEVERITIES = "3"
+DEGRADED_BATCH_SIZE = 128
 
 SWEEP_START_TIME = time.time()
 
@@ -262,13 +276,60 @@ def is_complete(backbone_lr, head_lr):
     return len(metrics.get("epochs", [])) >= EPOCHS
 
 
+def run_degraded_eval(current_exp_dir):
+    if not RUN_DEGRADED_EVAL:
+        return
+    if not EVAL_DIR.exists():
+        warnings.warn(f"EVAL_DIR not found; skipping degraded eval: {EVAL_DIR}", RuntimeWarning)
+        return
+
+    best_checkpoint = Path(current_exp_dir) / "best.pth"
+    if not best_checkpoint.exists():
+        warnings.warn(
+            f"Missing best.pth for degraded eval: {best_checkpoint}. Skipping.",
+            RuntimeWarning,
+        )
+        return
+
+    degraded_cmd = [
+        sys.executable,
+        "eval_degraded_6phase2.py",
+        "--backbone",
+        BACKBONE,
+        "--checkpoint",
+        str(best_checkpoint),
+        "--checkpoint-label",
+        Path(current_exp_dir).name,
+        "--data-dir",
+        str(EVAL_DIR),
+        "--output",
+        str(Path(current_exp_dir) / "degraded_eval"),
+        "--targets",
+        ",".join(DEGRADED_TARGETS),
+        "--degradations",
+        ",".join(DEGRADED_DEGRADATIONS),
+        "--severities",
+        DEGRADED_SEVERITIES,
+        "--batch-size",
+        str(DEGRADED_BATCH_SIZE),
+        "--device",
+        "cuda" if torch.cuda.is_available() else "cpu",
+    ]
+    if USE_FP16:
+        degraded_cmd.append("--fp16")
+
+    run(degraded_cmd, cwd=ARCFACE_DIR)
+
+
 print("Cell 5 NUM_CLASSES:", NUM_CLASSES)
 assert NUM_CLASSES < 100000, f"Bad NUM_CLASSES={NUM_CLASSES}"
 assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
 
 for backbone_lr, head_lr in LR_SWEEP:
+    current_exp_dir = exp_dir(backbone_lr, head_lr)
     if is_complete(backbone_lr, head_lr):
         print(f"[SKIP] {LOSS_NAME} blr={backbone_lr} hlr={head_lr} complete.")
+        run_degraded_eval(current_exp_dir)
         continue
 
     train_minutes_left = remaining_train_minutes()
@@ -279,7 +340,7 @@ for backbone_lr, head_lr in LR_SWEEP:
         )
         break
 
-    latest = exp_dir(backbone_lr, head_lr) / "latest.pt"
+    latest = current_exp_dir / "latest.pt"
     cmd = [
         sys.executable,
         "train_phase2_kaggle.py",
@@ -343,6 +404,7 @@ for backbone_lr, head_lr in LR_SWEEP:
             "is not complete yet. Resume next session."
         )
         break
+    run_degraded_eval(current_exp_dir)
 
 print("Done. Loss:", LOSS_NAME)
 print("LR sweep:", LR_SWEEP)

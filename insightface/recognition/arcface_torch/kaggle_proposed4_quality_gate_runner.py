@@ -121,11 +121,17 @@ def has_train_data(path):
 
 def normalize_train_data_dir(path):
     path = Path(path)
-    nested_train = path / "casia-webface"
-    if has_train_data(nested_train):
-        print("Detected nested CASIA-WebFace layout. Using train folder:", nested_train)
-        return nested_train
+    for child in ("casia-webface", "CASIA-WebFace"):
+        nested_train = path / child
+        if has_train_data(nested_train):
+            print("Detected nested CASIA-WebFace layout. Using train folder:", nested_train)
+            return nested_train
     return path
+
+
+def looks_like_casia_path(path):
+    text = "/".join(part.lower() for part in Path(path).parts)
+    return "casia" in text and "webface" in text
 
 
 def resolve_train_data_dir(preferred):
@@ -133,20 +139,28 @@ def resolve_train_data_dir(preferred):
         preferred,
         INPUT_ROOT / "CASIA-WebFace" / "casia-webface",
         INPUT_ROOT / "CASIA-WebFace",
+        INPUT_ROOT / "casia-webface" / "casia-webface",
+        INPUT_ROOT / "casia-webface",
     ]
 
     candidates = []
     for path in preferred_paths:
         candidates.append(path)
+    candidates.extend(
+        directory
+        for directory in input_dirs(max_depth=2)
+        if looks_like_casia_path(directory)
+    )
 
     for candidate in unique_existing(candidates):
         normalized = normalize_train_data_dir(candidate)
-        if has_train_data(normalized):
+        if has_train_data(normalized) and looks_like_casia_path(normalized):
             return normalized
 
     raise FileNotFoundError(
-        "Could not find CASIA-WebFace train data. Expected "
-        "/kaggle/input/CASIA-WebFace/casia-webface with train.rec/train.idx."
+        "Could not find CASIA-WebFace train data. Expected a CASIA path such as "
+        "/kaggle/input/CASIA-WebFace/casia-webface or "
+        "/kaggle/input/casia-webface/casia-webface with train.rec/train.idx."
     )
 
 
@@ -154,11 +168,20 @@ def resolve_eval_dir(train_dir):
     candidates = [
         Path(train_dir).parent / "eval",
         INPUT_ROOT / "CASIA-WebFace" / "eval",
+        INPUT_ROOT / "casia-webface" / "eval",
     ]
+    candidates.extend(
+        directory
+        for directory in input_dirs(max_depth=2)
+        if looks_like_casia_path(directory)
+    )
 
     for candidate in unique_existing(candidates):
-        if any((candidate / f"{name}.bin").exists() for name in EVAL_TARGETS):
-            return candidate
+        eval_dir = candidate
+        if not any((eval_dir / f"{name}.bin").exists() for name in EVAL_TARGETS):
+            eval_dir = candidate / "eval"
+        if any((eval_dir / f"{name}.bin").exists() for name in EVAL_TARGETS):
+            return eval_dir
     return None
 
 

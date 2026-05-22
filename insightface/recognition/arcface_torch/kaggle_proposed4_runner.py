@@ -338,6 +338,8 @@ print("Restored previous proposed4 outputs to:" if restored else "No previous pr
 
 # %%
 compile_files = [
+    "degradation/transforms.py",
+    "eval_degraded_6phase2.py",
     "soft_gated_losses.py",
     "train_soft_gated_lambda_kaggle.py",
     "train_phase2_kaggle.py",
@@ -458,6 +460,18 @@ MAX_TRAIN_MINUTES = 600
 MIN_TRAIN_MINUTES_TO_START = 2
 RUN_OPTIONAL_2X_LR = False
 RUN_START_TIME = time.time()
+RUN_DEGRADED_EVAL = True
+DEGRADED_TARGETS = ["lfw", "cfp_fp", "cplfw", "agedb_30", "calfw"]
+DEGRADED_DEGRADATIONS = [
+    "gaussian_blur",
+    "motion_blur",
+    "low_resolution",
+    "jpeg_compression",
+    "low_illumination",
+    "alignment_perturb",
+]
+DEGRADED_SEVERITIES = "3"
+DEGRADED_BATCH_SIZE = 128
 
 TRAIN_CONFIGS = [
     {"backbone_lr": 1e-4, "head_lr": 1e-3},
@@ -494,6 +508,51 @@ def remaining_train_minutes():
     return max(0.0, MAX_TRAIN_MINUTES - elapsed_minutes)
 
 
+def run_degraded_eval(current_exp_dir):
+    if not RUN_DEGRADED_EVAL:
+        return
+    if EVAL_DIR is None:
+        warnings.warn("No EVAL_DIR found; skipping degraded eval.", RuntimeWarning)
+        return
+
+    best_checkpoint = Path(current_exp_dir) / "best.pth"
+    if not best_checkpoint.exists():
+        warnings.warn(
+            f"Missing best.pth for degraded eval: {best_checkpoint}. Skipping.",
+            RuntimeWarning,
+        )
+        return
+
+    degraded_cmd = [
+        sys.executable,
+        "eval_degraded_6phase2.py",
+        "--backbone",
+        BACKBONE,
+        "--checkpoint",
+        str(best_checkpoint),
+        "--checkpoint-label",
+        Path(current_exp_dir).name,
+        "--data-dir",
+        str(EVAL_DIR),
+        "--output",
+        str(Path(current_exp_dir) / "degraded_eval"),
+        "--targets",
+        ",".join(DEGRADED_TARGETS),
+        "--degradations",
+        ",".join(DEGRADED_DEGRADATIONS),
+        "--severities",
+        DEGRADED_SEVERITIES,
+        "--batch-size",
+        str(DEGRADED_BATCH_SIZE),
+        "--device",
+        device.type,
+    ]
+    if USE_FP16:
+        degraded_cmd.append("--fp16")
+
+    run(degraded_cmd, cwd=ARCFACE_DIR)
+
+
 print("Cell train NUM_CLASSES:", NUM_CLASSES)
 assert NUM_CLASSES < 100000, f"Bad NUM_CLASSES={NUM_CLASSES}"
 assert NUM_CLASSES in (10572, 10575), f"Unexpected NUM_CLASSES={NUM_CLASSES}"
@@ -505,6 +564,7 @@ for cfg in TRAIN_CONFIGS:
 
     if is_complete(backbone_lr, head_lr):
         print("[SKIP] proposed4 complete:", current_exp_dir)
+        run_degraded_eval(current_exp_dir)
         continue
 
     train_minutes_left = remaining_train_minutes()
@@ -576,6 +636,10 @@ for cfg in TRAIN_CONFIGS:
         cmd.extend(["--pretrained_backbone", str(PRETRAINED_BACKBONE)])
 
     run(cmd, cwd=ARCFACE_DIR)
+    if is_complete(backbone_lr, head_lr):
+        run_degraded_eval(current_exp_dir)
+    else:
+        print("[SKIP] degraded eval because proposed4 is not complete yet:", current_exp_dir)
 
 print("Done. Proposed4 root:", SWEEP_ROOT)
 

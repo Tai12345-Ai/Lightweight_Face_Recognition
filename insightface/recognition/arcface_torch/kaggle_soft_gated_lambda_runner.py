@@ -509,6 +509,21 @@ try:
 except Exception as exc:
     print("Could not render download link:", exc)
 
+
+# Xuất file csv ở cell 7
+from pathlib import Path
+import base64
+from IPython.display import HTML, display
+
+csv = Path("/kaggle/working/soft_gated_lambda_eval_by_epoch.csv")
+assert csv.exists(), csv
+
+b64 = base64.b64encode(csv.read_bytes()).decode()
+display(HTML(
+    f'<a download="{csv.name}" href="data:text/csv;base64,{b64}">'
+    f'Download {csv.name}</a>'
+))
+
 # %% [markdown]
 # ## Cell 8: Backup
 #
@@ -544,3 +559,16 @@ if root.exists():
         print("Download path:", zip_path)
 else:
     print("No sweep outputs yet:", root)
+
+#Xuất file zip ở cell 8
+import os
+from IPython.display import FileLink, display
+from pathlib import Path
+
+os.chdir("/kaggle/working")
+
+p = Path("soft_gated_lambda_sweep.zip")
+print("exists:", p.exists())
+print("size GB:", p.stat().st_size / 1024**3)
+
+display(FileLink("soft_gated_lambda_sweep.zip"))
