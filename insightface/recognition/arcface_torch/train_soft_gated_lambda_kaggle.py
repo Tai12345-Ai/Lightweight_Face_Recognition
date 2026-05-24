@@ -13,6 +13,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,6 +26,7 @@ from soft_gated_losses import (
     CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss,
     CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss,
     SoftGatedAdaCurricularFaceLoss,
+    UIAwareCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss,
 )
 from train_phase2_kaggle import (
     MarginSoftmaxHead,
@@ -92,6 +94,22 @@ LOSS_STAT_KEYS = (
     "hard_negative_ratio",
     "quality_modulated_lambda_ratio",
     "curricular_t",
+    "ui_center_ready",
+    "cos_ui_mean",
+    "d_ui_mean",
+    "ri_mean",
+    "ri_min",
+    "ri_max",
+    "hard_i_mean",
+    "ui_like_i_mean",
+    "ui_lambda_i_mean",
+    "ui_lambda_i_max",
+    "ui_loss_mean",
+    "ui_extra_loss",
+    "easy_recognizable_ratio",
+    "hard_identifiable_ratio",
+    "ui_like_ratio",
+    "dangerous_ratio",
 )
 
 
@@ -109,6 +127,8 @@ def parse_args():
             "competition_adaptive_soft_gated_ada_curricular",
             "competition_quality_adaptive_soft_gated_ada_curricular",
             "proposed_4_quality_gate",
+            "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular",
+            "proposed_4_2_ui_aware",
         ],
         help="Standalone loss name for config compatibility.",
     )
@@ -133,6 +153,43 @@ def parse_args():
         dest="lambda_warmup_epochs",
         type=float,
         default=2.0,
+    )
+    parser.add_argument("--ui_lambda", "--ui-lambda", dest="ui_lambda", type=float, default=0.05)
+    parser.add_argument("--ui_rho", "--ui-rho", dest="ui_rho", type=float, default=0.2)
+    parser.add_argument("--ui_tau_ri", "--ui-tau-ri", dest="ui_tau_ri", type=float, default=1.0)
+    parser.add_argument("--ui_tau_easy", "--ui-tau-easy", dest="ui_tau_easy", type=float, default=2.0)
+    parser.add_argument("--ui_d_margin", "--ui-d-margin", dest="ui_d_margin", type=float, default=0.25)
+    parser.add_argument("--ui_alpha", "--ui-alpha", dest="ui_alpha", type=float, default=10.0)
+    parser.add_argument("--ui_beta", "--ui-beta", dest="ui_beta", type=float, default=5.0)
+    parser.add_argument("--ui_hard_boost", "--ui-hard-boost", dest="ui_hard_boost", type=float, default=0.1)
+    parser.add_argument(
+        "--ui_dangerous_downweight",
+        "--ui-dangerous-downweight",
+        dest="ui_dangerous_downweight",
+        type=float,
+        default=0.35,
+    )
+    parser.add_argument(
+        "--ui_sample_weight_min",
+        "--ui-sample-weight-min",
+        dest="ui_sample_weight_min",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        "--ui_center_momentum",
+        "--ui-center-momentum",
+        dest="ui_center_momentum",
+        type=float,
+        default=0.99,
+    )
+    parser.add_argument(
+        "--ui_center_update_interval",
+        "--ui-center-update-interval",
+        dest="ui_center_update_interval",
+        type=int,
+        default=20,
+        help="Update synthetic UI center every N steps for Proposed 4.2. Use 0 to disable.",
     )
     parser.add_argument(
         "--train_data",
@@ -230,6 +287,8 @@ def parse_args():
     args = parser.parse_args()
     if args.loss == "proposed_4_quality_gate":
         args.loss = "competition_quality_adaptive_soft_gated_ada_curricular"
+    if args.loss == "proposed_4_2_ui_aware":
+        args.loss = "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular"
     if args.loss == "soft_gated_ada_curricular" and args.lambda_gate is None:
         parser.error("--lambda_gate is required when --loss soft_gated_ada_curricular")
     if (
@@ -283,6 +342,16 @@ def experiment_dir(args) -> Path:
             f"_hlr_{float_tag(args.head_lr)}"
         )
         return Path(args.output_dir) / "proposed4_quality_gate" / name
+    if args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+        name = (
+            f"{args.backbone}_proposed4_2_ui_aware"
+            f"_uil_{float_tag(args.ui_lambda)}"
+            f"_rho_{float_tag(args.ui_rho)}"
+            f"_tri_{float_tag(args.ui_tau_ri)}"
+            f"_blr_{float_tag(args.backbone_lr)}"
+            f"_hlr_{float_tag(args.head_lr)}"
+        )
+        return Path(args.output_dir) / "proposed4_2_ui_aware" / name
 
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
     if getattr(args, "use_split_lr", False):
@@ -294,6 +363,22 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     config = vars(args).copy()
     if args.loss != "adaptive_soft_gated_ada_curricular_v2":
         config.pop("alpha_quality_floor", None)
+    if args.loss != "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+        for key in (
+            "ui_lambda",
+            "ui_rho",
+            "ui_tau_ri",
+            "ui_tau_easy",
+            "ui_d_margin",
+            "ui_alpha",
+            "ui_beta",
+            "ui_hard_boost",
+            "ui_dangerous_downweight",
+            "ui_sample_weight_min",
+            "ui_center_momentum",
+            "ui_center_update_interval",
+        ):
+            config.pop(key, None)
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
     config["eval_dir"] = str(args.eval_dir) if args.eval_dir else None
@@ -371,6 +456,37 @@ def add_group_metrics(row: Dict, group_metrics: Dict[str, float]) -> Dict:
     return row
 
 
+def make_synthetic_ui_batch(images: torch.Tensor, step: int) -> torch.Tensor:
+    """Build severe low-quality views for updating the Proposed 4.2 UI center."""
+    x = ((images.detach().float() + 1.0) * 0.5).clamp(0.0, 1.0)
+    _, _, height, width = x.shape
+
+    low_size = (14, 20, 28)[step % 3]
+    low_size = max(4, min(low_size, height, width))
+    x = F.interpolate(x, size=(low_size, low_size), mode="bilinear", align_corners=False)
+    x = F.interpolate(x, size=(height, width), mode="bilinear", align_corners=False)
+
+    kernel = 7 if step % 2 == 0 else 9
+    pad = kernel // 2
+    x = F.avg_pool2d(F.pad(x, (pad, pad, pad, pad), mode="reflect"), kernel, stride=1)
+
+    shift = 3 + (step % 3)
+    motion = (
+        x
+        + torch.roll(x, shifts=shift, dims=3)
+        + torch.roll(x, shifts=-shift, dims=3)
+    ) / 3.0
+    x = motion if step % 2 == 0 else (
+        x + torch.roll(x, shifts=shift, dims=2) + torch.roll(x, shifts=-shift, dims=2)
+    ) / 3.0
+
+    x = torch.roll(x, shifts=(shift, -shift), dims=(2, 3))
+    x = (x.pow(2.4 + 0.2 * (step % 3)) * 0.85).clamp(0.0, 1.0)
+    x = (torch.round(x * 31.0) / 31.0).clamp(0.0, 1.0)
+    x = (x + torch.randn_like(x) * 0.03).clamp(0.0, 1.0)
+    return (x * 2.0 - 1.0).to(dtype=images.dtype)
+
+
 def _same_float(a, b, tol=1e-9):
     return abs(float(a) - float(b)) <= tol
 
@@ -404,6 +520,25 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
         "competition_quality_adaptive_soft_gated_ada_curricular",
     ):
         float_keys.extend(["t_alpha", "curriculum_alpha", "eps"])
+    elif args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+        float_keys.extend(
+            [
+                "ui_lambda",
+                "ui_rho",
+                "ui_tau_ri",
+                "ui_tau_easy",
+                "ui_d_margin",
+                "ui_alpha",
+                "ui_beta",
+                "ui_hard_boost",
+                "ui_dangerous_downweight",
+                "ui_sample_weight_min",
+                "ui_center_momentum",
+                "t_alpha",
+                "curriculum_alpha",
+                "eps",
+            ]
+        )
     else:
         float_keys.append("lambda_gate")
 
@@ -550,6 +685,27 @@ def main():
             curriculum_alpha=args.curriculum_alpha,
             eps=args.eps,
         )
+    elif args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+        margin_loss = UIAwareCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            ui_lambda=args.ui_lambda,
+            ui_rho=args.ui_rho,
+            ui_tau_ri=args.ui_tau_ri,
+            ui_tau_easy=args.ui_tau_easy,
+            ui_d_margin=args.ui_d_margin,
+            ui_alpha=args.ui_alpha,
+            ui_beta=args.ui_beta,
+            ui_hard_boost=args.ui_hard_boost,
+            ui_dangerous_downweight=args.ui_dangerous_downweight,
+            ui_sample_weight_min=args.ui_sample_weight_min,
+            ui_center_momentum=args.ui_center_momentum,
+            ui_center_dim=args.embedding_size,
+            t_alpha=args.t_alpha,
+            curriculum_alpha=args.curriculum_alpha,
+            eps=args.eps,
+        )
     else:
         margin_loss = SoftGatedAdaCurricularFaceLoss(
             s=args.s,
@@ -630,6 +786,26 @@ def main():
             args.gate_gamma,
             args.alpha_quality_floor,
             args.lambda_warmup_epochs,
+            args.backbone,
+            num_classes,
+            len(dataset),
+            args.batch_size,
+            args.lr,
+            args.backbone_lr,
+            args.head_lr,
+        )
+    elif args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+        logging.info(
+            (
+                "Training loss=%s ui_lambda=%.4f ui_rho=%.4f ui_tau_ri=%.4f "
+                "ui_center_update_interval=%d backbone=%s classes=%d images=%d "
+                "batch_size=%d base_lr=%g backbone_lr=%g head_lr=%g"
+            ),
+            args.loss,
+            args.ui_lambda,
+            args.ui_rho,
+            args.ui_tau_ri,
+            args.ui_center_update_interval,
             args.backbone,
             num_classes,
             len(dataset),
@@ -730,6 +906,30 @@ def main():
             global_step += 1
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True).long()
+
+            if (
+                args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular"
+                and args.ui_center_update_interval > 0
+                and (
+                    global_step == 1
+                    or global_step % args.ui_center_update_interval == 0
+                    or not bool(getattr(margin_loss, "ui_center_ready").item())
+                )
+            ):
+                was_training = backbone.training
+                backbone.eval()
+                with torch.no_grad():
+                    ui_images = make_synthetic_ui_batch(images, global_step)
+                    ui_amp_context = (
+                        amp_autocast(use_amp)
+                        if device.type == "cuda"
+                        else contextlib.nullcontext()
+                    )
+                    with ui_amp_context:
+                        ui_embeddings = backbone(ui_images)
+                    margin_loss.update_ui_center(ui_embeddings)
+                if was_training:
+                    backbone.train()
 
             optimizer.zero_grad(set_to_none=True)
             amp_context = amp_autocast(use_amp) if device.type == "cuda" else contextlib.nullcontext()
@@ -906,6 +1106,15 @@ def main():
                     "gate_gamma": float(args.gate_gamma),
                     "alpha_quality_floor": float(args.alpha_quality_floor),
                     "lambda_warmup_epochs": float(args.lambda_warmup_epochs),
+                }
+            )
+        elif args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+            epoch_record.update(
+                {
+                    "ui_lambda": float(args.ui_lambda),
+                    "ui_rho": float(args.ui_rho),
+                    "ui_tau_ri": float(args.ui_tau_ri),
+                    "ui_center_update_interval": int(args.ui_center_update_interval),
                 }
             )
         add_loss_stats(epoch_record, last_loss_stats)

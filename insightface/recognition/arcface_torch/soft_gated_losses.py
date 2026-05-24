@@ -9,6 +9,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _label_view(labels: torch.Tensor) -> torch.Tensor:
@@ -404,6 +405,305 @@ class CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(nn.Module):
                     quality_ratio.detach().float().mean().item()
                 ),
                 "curricular_t": float(self.t.detach().item()),
+            }
+        return logits * self.s
+
+
+class UIAwareCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(nn.Module):
+    """Proposed 4.2: Proposed 4.1 with UI-aware recognizability.
+
+    The classification branch stays close to Proposed 4.1. In addition, the
+    loss keeps an EMA center for synthetic unrecognizable-identity samples and
+    penalizes embeddings that move too close to that center:
+
+        RI_i = dUI_i * dN_i / (dP_i + eps)
+        L_UI_i = max(0, cos(v_i, v_UI) - rho)
+        L_total = L_P4.1 + mean(lambda_ui_i * L_UI_i)
+
+    ``lambda_ui_i`` is detached and combines feature-norm quality, negative
+    competition, and low RI. Dangerous UI-like samples also receive a mild CE
+    down-weight so they are not forced into the labeled class as aggressively as
+    hard-but-identifiable samples.
+    """
+
+    requires_norms = True
+    requires_embeddings = True
+
+    def __init__(
+        self,
+        s: float = 64.0,
+        m: float = 0.4,
+        h: float = 0.333,
+        ui_lambda: float = 0.05,
+        ui_rho: float = 0.2,
+        ui_tau_ri: float = 1.0,
+        ui_tau_easy: float = 2.0,
+        ui_d_margin: float = 0.25,
+        ui_alpha: float = 10.0,
+        ui_beta: float = 5.0,
+        ui_hard_boost: float = 0.1,
+        ui_dangerous_downweight: float = 0.35,
+        ui_sample_weight_min: float = 0.5,
+        ui_center_momentum: float = 0.99,
+        ui_center_dim: int = 512,
+        t_alpha: float = 0.01,
+        curriculum_alpha: float = 0.99,
+        eps: float = 1e-3,
+    ):
+        super().__init__()
+        if ui_lambda < 0.0:
+            raise ValueError("ui_lambda must be non-negative.")
+        if not -1.0 <= ui_rho <= 1.0:
+            raise ValueError("ui_rho must be a cosine threshold in [-1, 1].")
+        if ui_tau_ri < 0.0 or ui_tau_easy < 0.0:
+            raise ValueError("UI RI thresholds must be non-negative.")
+        if not 0.0 <= ui_dangerous_downweight <= 1.0:
+            raise ValueError("ui_dangerous_downweight must be in [0, 1].")
+        if not 0.0 < ui_sample_weight_min <= 1.0:
+            raise ValueError("ui_sample_weight_min must be in (0, 1].")
+        if not 0.0 <= ui_center_momentum < 1.0:
+            raise ValueError("ui_center_momentum must be in [0, 1).")
+        if ui_center_dim <= 0:
+            raise ValueError("ui_center_dim must be positive.")
+
+        self.s = s
+        self.m = m
+        self.h = h
+        self.ui_lambda = ui_lambda
+        self.ui_rho = ui_rho
+        self.ui_tau_ri = ui_tau_ri
+        self.ui_tau_easy = ui_tau_easy
+        self.ui_d_margin = ui_d_margin
+        self.ui_alpha = ui_alpha
+        self.ui_beta = ui_beta
+        self.ui_hard_boost = ui_hard_boost
+        self.ui_dangerous_downweight = ui_dangerous_downweight
+        self.ui_sample_weight_min = ui_sample_weight_min
+        self.ui_center_momentum = ui_center_momentum
+        self.ui_center_dim = ui_center_dim
+        self.t_alpha = t_alpha
+        self.curriculum_alpha = curriculum_alpha
+        self.eps = eps
+        self.last_stats = {}
+        self._last_extra_loss = None
+        self._last_sample_weight = None
+        self.register_buffer("batch_mean", torch.ones(1) * 20.0)
+        self.register_buffer("batch_std", torch.ones(1) * 100.0)
+        self.register_buffer("t", torch.zeros(1))
+        self.register_buffer("ui_center", torch.zeros(1, ui_center_dim))
+        self.register_buffer("ui_center_ready", torch.zeros(1, dtype=torch.bool))
+
+    def _quality_indicator(self, labels: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        index, _ = _positive_indices(labels)
+        safe_norms = norms.view(-1, 1).clamp(min=0.001, max=100.0).detach()
+
+        with torch.no_grad():
+            positive_norms = safe_norms[index]
+            if positive_norms.numel() > 1:
+                batch_mean = positive_norms.mean()
+                batch_std = positive_norms.std(unbiased=False).clamp_min(self.eps)
+                self.batch_mean.mul_(1.0 - self.t_alpha).add_(batch_mean * self.t_alpha)
+                self.batch_std.mul_(1.0 - self.t_alpha).add_(batch_std * self.t_alpha)
+
+        q = (safe_norms[index].view(-1) - self.batch_mean) / (
+            self.batch_std + self.eps
+        )
+        return (q * self.h).clamp(-1.0, 1.0).detach()
+
+    @torch.no_grad()
+    def update_ui_center(self, embeddings: torch.Tensor) -> None:
+        if embeddings is None or embeddings.numel() == 0:
+            return
+        center = F.normalize(embeddings.detach().float(), dim=1).mean(dim=0, keepdim=True)
+        center = F.normalize(center, dim=1)
+        if self.ui_center.shape != center.shape:
+            self.ui_center = center.to(device=self.ui_center.device)
+            self.ui_center_ready.fill_(True)
+            return
+        if not bool(self.ui_center_ready.item()):
+            self.ui_center.copy_(center.to(device=self.ui_center.device))
+            self.ui_center_ready.fill_(True)
+            return
+        updated = (
+            self.ui_center.float() * self.ui_center_momentum
+            + center.to(device=self.ui_center.device) * (1.0 - self.ui_center_momentum)
+        )
+        self.ui_center.copy_(F.normalize(updated, dim=1).to(dtype=self.ui_center.dtype))
+
+    def forward(self, logits, labels, embeddings=None, norms=None):
+        self._last_extra_loss = None
+        self._last_sample_weight = None
+        if norms is None:
+            raise RuntimeError(
+                "UIAwareCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss "
+                "requires feature norms."
+            )
+        if embeddings is None:
+            raise RuntimeError(
+                "UIAwareCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss "
+                "requires embeddings."
+            )
+
+        index, target = _positive_indices(labels)
+        logits = logits.clone()
+        if index.numel() == 0:
+            self.last_stats = {}
+            return logits * self.s
+
+        rows = logits[index].clone()
+        q = self._quality_indicator(labels, norms).to(dtype=rows.dtype)
+
+        target_cos = _safe_cosine(
+            rows.gather(1, target.view(-1, 1)).view(-1), eps=self.eps
+        )
+        theta_y = target_cos.acos()
+
+        u_pos = torch.cos(theta_y - self.m * q)
+        u_pos = (u_pos - (self.m * q + self.m)).to(dtype=rows.dtype)
+        arc_anchor = torch.cos(theta_y + self.m).to(dtype=rows.dtype)
+
+        one_hot = torch.zeros_like(rows, dtype=torch.bool)
+        one_hot.scatter_(1, target.view(-1, 1), True)
+
+        c_minus = rows.detach().masked_fill(one_hot, -1.0).max(dim=1).values
+        d_i = (
+            (c_minus - arc_anchor.detach()).relu()
+            / (1.0 - arc_anchor.detach() + self.eps)
+        ).clamp(0.0, 1.0).detach()
+
+        q_pos = q.clamp(0.0, 1.0)
+        q_factor = (0.75 + 0.25 * q_pos).detach()
+        gate_lambda_i = (self.h * d_i * q_factor).detach()
+        tau = (
+            (1.0 - gate_lambda_i) * arc_anchor.detach()
+            + gate_lambda_i * u_pos.detach()
+        ).detach()
+
+        with torch.no_grad():
+            self.t.mul_(self.curriculum_alpha).add_(
+                arc_anchor.detach().mean() * (1.0 - self.curriculum_alpha)
+            )
+
+        hard_mask = (rows > tau.view(-1, 1)) & (~one_hot)
+        total_negatives = (~one_hot).sum().clamp_min(1)
+        hard_negative_ratio = hard_mask.sum().float() / total_negatives.float()
+
+        t = self.t.to(dtype=rows.dtype)
+        rows = torch.where(hard_mask, rows * (t + rows), rows).to(dtype=rows.dtype)
+
+        ui_ready = bool(self.ui_center_ready.item())
+        if ui_ready:
+            valid_embeddings = embeddings[index]
+            v = F.normalize(valid_embeddings.float(), dim=1)
+            ui_center = F.normalize(
+                self.ui_center.to(device=v.device, dtype=v.dtype), dim=1
+            )
+            cos_ui = (v * ui_center).sum(dim=1).clamp(-1.0 + self.eps, 1.0 - self.eps)
+
+            d_p = (1.0 - target_cos.detach().float()).clamp_min(0.0)
+            d_n = (1.0 - c_minus.detach().float()).clamp_min(0.0)
+            d_ui = (1.0 - cos_ui.detach()).clamp_min(0.0)
+            ri = (d_ui * d_n / (d_p + self.eps)).clamp_min(0.0)
+
+            hard_i = torch.sigmoid(
+                self.ui_alpha * (c_minus.detach().float() - target_cos.detach().float())
+            )
+            ui_like_i = torch.sigmoid(self.ui_beta * (self.ui_tau_ri - ri))
+            ui_lambda_i = (
+                self.ui_lambda * q_factor.float() * hard_i * ui_like_i
+            ).detach()
+            ui_loss = F.relu(cos_ui - self.ui_rho)
+            self._last_extra_loss = (ui_lambda_i * ui_loss).mean()
+
+            positive_wins = target_cos.detach().float() > c_minus.detach().float()
+            ui_like_mask = (ri < self.ui_tau_ri) | (d_ui < self.ui_d_margin)
+            easy_mask = (ri >= self.ui_tau_easy) & positive_wins
+            hard_identifiable_mask = (
+                (ri >= self.ui_tau_ri) & (ri < self.ui_tau_easy) & positive_wins
+            )
+            dangerous_mask = ui_like_mask & (~positive_wins)
+
+            hard_boost = self.ui_hard_boost * hard_identifiable_mask.float()
+            danger_drop = self.ui_dangerous_downweight * dangerous_mask.float()
+            sample_weight_valid = (1.0 + hard_boost - danger_drop).clamp(
+                self.ui_sample_weight_min, 1.0 + self.ui_hard_boost
+            )
+            sample_weight = torch.ones(
+                labels.view(-1).shape[0],
+                device=rows.device,
+                dtype=rows.dtype,
+            )
+            sample_weight[index] = sample_weight_valid.to(dtype=rows.dtype)
+            self._last_sample_weight = sample_weight.detach()
+        else:
+            cos_ui = rows.new_zeros(index.numel()).float()
+            d_ui = rows.new_zeros(index.numel()).float()
+            ri = rows.new_zeros(index.numel()).float()
+            hard_i = rows.new_zeros(index.numel()).float()
+            ui_like_i = rows.new_zeros(index.numel()).float()
+            ui_lambda_i = rows.new_zeros(index.numel()).float()
+            ui_loss = rows.new_zeros(index.numel()).float()
+            easy_mask = torch.zeros(index.numel(), device=rows.device, dtype=torch.bool)
+            hard_identifiable_mask = torch.zeros_like(easy_mask)
+            ui_like_mask = torch.zeros_like(easy_mask)
+            dangerous_mask = torch.zeros_like(easy_mask)
+
+        rows.scatter_(1, target.view(-1, 1), u_pos.view(-1, 1))
+        logits[index] = rows
+
+        with torch.no_grad():
+            q_float = q.detach().float()
+            q_pos_float = q_pos.detach().float()
+            q_factor_float = q_factor.detach().float()
+            d_float = d_i.detach().float()
+            gate_lambda_float = gate_lambda_i.detach().float()
+            quality_ratio = gate_lambda_i / (self.h * d_i + self.eps)
+            ui_extra_loss = (
+                0.0
+                if self._last_extra_loss is None
+                else float(self._last_extra_loss.detach().float().item())
+            )
+            self.last_stats = {
+                "q_mean": float(q_float.mean().item()),
+                "q_std": float(q_float.std(unbiased=False).item()),
+                "q_min": float(q_float.min().item()),
+                "q_max": float(q_float.max().item()),
+                "q_pos_mean": float(q_pos_float.mean().item()),
+                "q_factor_mean": float(q_factor_float.mean().item()),
+                "q_factor_min": float(q_factor_float.min().item()),
+                "q_factor_max": float(q_factor_float.max().item()),
+                "u_pos_mean": float(u_pos.detach().float().mean().item()),
+                "arc_anchor_mean": float(arc_anchor.detach().float().mean().item()),
+                "c_minus_mean": float(c_minus.detach().float().mean().item()),
+                "d_mean": float(d_float.mean().item()),
+                "d_max": float(d_float.max().item()),
+                "lambda_i_mean": float(gate_lambda_float.mean().item()),
+                "lambda_i_max": float(gate_lambda_float.max().item()),
+                "tau_mean": float(tau.detach().float().mean().item()),
+                "hard_negative_ratio": float(hard_negative_ratio.item()),
+                "competition_active_ratio": float((d_float > 0.0).float().mean().item()),
+                "quality_modulated_lambda_ratio": float(
+                    quality_ratio.detach().float().mean().item()
+                ),
+                "curricular_t": float(self.t.detach().item()),
+                "ui_center_ready": float(1.0 if ui_ready else 0.0),
+                "cos_ui_mean": float(cos_ui.detach().float().mean().item()),
+                "d_ui_mean": float(d_ui.detach().float().mean().item()),
+                "ri_mean": float(ri.detach().float().mean().item()),
+                "ri_min": float(ri.detach().float().min().item()),
+                "ri_max": float(ri.detach().float().max().item()),
+                "hard_i_mean": float(hard_i.detach().float().mean().item()),
+                "ui_like_i_mean": float(ui_like_i.detach().float().mean().item()),
+                "ui_lambda_i_mean": float(ui_lambda_i.detach().float().mean().item()),
+                "ui_lambda_i_max": float(ui_lambda_i.detach().float().max().item()),
+                "ui_loss_mean": float(ui_loss.detach().float().mean().item()),
+                "ui_extra_loss": ui_extra_loss,
+                "easy_recognizable_ratio": float(easy_mask.float().mean().item()),
+                "hard_identifiable_ratio": float(
+                    hard_identifiable_mask.float().mean().item()
+                ),
+                "ui_like_ratio": float(ui_like_mask.float().mean().item()),
+                "dangerous_ratio": float(dangerous_mask.float().mean().item()),
             }
         return logits * self.s
 

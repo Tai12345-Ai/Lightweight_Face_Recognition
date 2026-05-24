@@ -141,10 +141,25 @@ class MarginSoftmaxHead(nn.Module):
         logits = self.margin_loss(
             logits, labels.view(-1, 1), embeddings=embeddings, norms=norms
         )
-        loss = F.cross_entropy(logits, labels, ignore_index=-1)
+        sample_weight = getattr(self.margin_loss, "_last_sample_weight", None)
+        if sample_weight is None:
+            loss = F.cross_entropy(logits, labels, ignore_index=-1)
+        else:
+            per_sample_loss = F.cross_entropy(
+                logits, labels, ignore_index=-1, reduction="none"
+            )
+            valid = labels != -1
+            weights = sample_weight.to(
+                device=per_sample_loss.device, dtype=per_sample_loss.dtype
+            ).view(-1)
+            weights = torch.where(valid, weights.clamp_min(0.0), torch.zeros_like(weights))
+            loss = (per_sample_loss * weights).sum() / weights.sum().clamp_min(1e-6)
         regularization = getattr(self.margin_loss, "_last_mag_reg", None)
         if regularization is not None:
             loss = loss + regularization
+        extra_loss = getattr(self.margin_loss, "_last_extra_loss", None)
+        if extra_loss is not None:
+            loss = loss + extra_loss
         return loss, logits, norms
 
 
