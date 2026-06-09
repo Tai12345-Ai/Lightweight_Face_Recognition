@@ -236,6 +236,19 @@ def exp_dir(config):
             f"_blr_{float_tag(backbone_lr)}"
             f"_hlr_{float_tag(head_lr)}"
         )
+<<<<<<< HEAD
+    elif kind == "proposed4_3":
+        name = (
+            f"{backbone}_proposed4_3_multi_ui_attention"
+            f"_uil_{float_tag(config['UI_LAMBDA'])}"
+            f"_rho_{float_tag(config['UI_RHO'])}"
+            f"_tri_{float_tag(config['UI_TAU_RI'])}"
+            f"_ag_{float_tag(config.get('ATTENTION_GAMMA', 0.05))}"
+            f"_blr_{float_tag(backbone_lr)}"
+            f"_hlr_{float_tag(head_lr)}"
+        )
+=======
+>>>>>>> origin/main
     else:
         raise ValueError(f"Unknown RUNNER_KIND: {kind}")
     return output_root(config) / config["OUTPUT_SUBDIR"] / name
@@ -510,6 +523,42 @@ def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, nu
             "--ui_center_update_interval",
             str(config["UI_CENTER_UPDATE_INTERVAL"]),
         ])
+<<<<<<< HEAD
+    if config["RUNNER_KIND"] == "proposed4_3":
+        cmd.extend([
+            "--ui_lambda",
+            str(config["UI_LAMBDA"]),
+            "--ui_rho",
+            str(config["UI_RHO"]),
+            "--ui_tau_ri",
+            str(config["UI_TAU_RI"]),
+            "--ui_tau_easy",
+            str(config["UI_TAU_EASY"]),
+            "--ui_d_margin",
+            str(config["UI_D_MARGIN"]),
+            "--ui_alpha",
+            str(config["UI_ALPHA"]),
+            "--ui_beta",
+            str(config["UI_BETA"]),
+            "--ui_hard_boost",
+            str(config["UI_HARD_BOOST"]),
+            "--ui_dangerous_downweight",
+            str(config["UI_DANGEROUS_DOWNWEIGHT"]),
+            "--ui_sample_weight_min",
+            str(config["UI_SAMPLE_WEIGHT_MIN"]),
+            "--multi-ui-centers",
+            str(config["MULTI_UI_CENTERS"]),
+        ])
+        if config.get("ENABLE_ATTENTION", False):
+            cmd.append("--enable-attention")
+            cmd.extend([
+                "--attention-gamma",
+                str(config.get("ATTENTION_GAMMA", 0.05)),
+                "--attention-reduction",
+                str(config.get("ATTENTION_REDUCTION", 16)),
+            ])
+=======
+>>>>>>> origin/main
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
 
     latest = Path(current_exp_dir) / "latest.pt"
@@ -607,6 +656,11 @@ def preflight_compile(config):
         "train_phase2_kaggle.py",
         "train_soft_gated_lambda_kaggle.py",
         "recordio_fallback.py",
+<<<<<<< HEAD
+        "perceptibility_attention.py",
+        "build_multi_ui_centers.py",
+=======
+>>>>>>> origin/main
         config["RUNNER_FILE"],
         "kaggle_5eval_degraded_common.py",
     ]
