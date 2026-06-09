@@ -25,9 +25,11 @@ from soft_gated_losses import (
     CompetitionAwareAdaFaceLoss,
     CompetitionAdaptiveSoftGatedAdaCurricularFaceLoss,
     CompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss,
+    MultiUIPerceptibilityCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss,
     SoftGatedAdaCurricularFaceLoss,
     UIAwareCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss,
 )
+from perceptibility_attention import PerceptibilityAttentionModule
 from train_phase2_kaggle import (
     MarginSoftmaxHead,
     amp_autocast,
@@ -110,6 +112,16 @@ LOSS_STAT_KEYS = (
     "hard_identifiable_ratio",
     "ui_like_ratio",
     "dangerous_ratio",
+    "cos_ui_multi_mean",
+    "d_ui_multi_mean",
+    "ri_multi_mean",
+    "ri_multi_min",
+    "ri_multi_max",
+    "gate_lambda_i_mean",
+    "sample_weight_mean",
+    "sample_weight_min",
+    "sample_weight_max",
+    "attention_loss",
 )
 
 
@@ -129,6 +141,8 @@ def parse_args():
             "proposed_4_quality_gate",
             "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular",
             "proposed_4_2_ui_aware",
+            "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular",
+            "proposed_4_3_multi_ui_attention",
         ],
         help="Standalone loss name for config compatibility.",
     )
@@ -284,11 +298,21 @@ def parse_args():
         default=0.99,
     )
     parser.add_argument("--eps", type=float, default=1e-3)
+    parser.add_argument("--multi_ui_centers", "--multi-ui-centers", dest="multi_ui_centers", default=None,
+                        help="Path to multi-UI centers .pth for Proposed 4.3.")
+    parser.add_argument("--enable_attention", "--enable-attention", dest="enable_attention",
+                        action="store_true", help="Enable perceptibility attention for Proposed 4.3.")
+    parser.add_argument("--attention_gamma", "--attention-gamma", dest="attention_gamma",
+                        type=float, default=0.05, help="Weight for attention auxiliary loss.")
+    parser.add_argument("--attention_reduction", "--attention-reduction", dest="attention_reduction",
+                        type=int, default=16, help="Channel reduction ratio for attention module.")
     args = parser.parse_args()
     if args.loss == "proposed_4_quality_gate":
         args.loss = "competition_quality_adaptive_soft_gated_ada_curricular"
     if args.loss == "proposed_4_2_ui_aware":
         args.loss = "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular"
+    if args.loss == "proposed_4_3_multi_ui_attention":
+        args.loss = "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular"
     if args.loss == "soft_gated_ada_curricular" and args.lambda_gate is None:
         parser.error("--lambda_gate is required when --loss soft_gated_ada_curricular")
     if (
@@ -352,6 +376,17 @@ def experiment_dir(args) -> Path:
             f"_hlr_{float_tag(args.head_lr)}"
         )
         return Path(args.output_dir) / "proposed4_2_ui_aware" / name
+    if args.loss == "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
+        name = (
+            f"{args.backbone}_proposed4_3_multi_ui_attention"
+            f"_uil_{float_tag(args.ui_lambda)}"
+            f"_rho_{float_tag(args.ui_rho)}"
+            f"_tri_{float_tag(args.ui_tau_ri)}"
+            f"_ag_{float_tag(args.attention_gamma)}"
+            f"_blr_{float_tag(args.backbone_lr)}"
+            f"_hlr_{float_tag(args.head_lr)}"
+        )
+        return Path(args.output_dir) / "proposed4_3_multi_ui_attention" / name
 
     name = f"{args.backbone}_{args.loss}_lambda_{lambda_tag(args.lambda_gate)}"
     if getattr(args, "use_split_lr", False):
@@ -363,7 +398,11 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
     config = vars(args).copy()
     if args.loss != "adaptive_soft_gated_ada_curricular_v2":
         config.pop("alpha_quality_floor", None)
-    if args.loss != "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+    is_ui_loss = args.loss in (
+        "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular",
+        "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular",
+    )
+    if not is_ui_loss:
         for key in (
             "ui_lambda",
             "ui_rho",
@@ -378,6 +417,9 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
             "ui_center_momentum",
             "ui_center_update_interval",
         ):
+            config.pop(key, None)
+    if args.loss != "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
+        for key in ("multi_ui_centers", "enable_attention", "attention_gamma", "attention_reduction"):
             config.pop(key, None)
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
@@ -520,7 +562,10 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
         "competition_quality_adaptive_soft_gated_ada_curricular",
     ):
         float_keys.extend(["t_alpha", "curriculum_alpha", "eps"])
-    elif args.loss == "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular":
+    elif args.loss in (
+        "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular",
+        "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular",
+    ):
         float_keys.extend(
             [
                 "ui_lambda",
@@ -533,7 +578,6 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
                 "ui_hard_boost",
                 "ui_dangerous_downweight",
                 "ui_sample_weight_min",
-                "ui_center_momentum",
                 "t_alpha",
                 "curriculum_alpha",
                 "eps",
@@ -706,6 +750,42 @@ def main():
             curriculum_alpha=args.curriculum_alpha,
             eps=args.eps,
         )
+    elif args.loss == "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
+        if not args.multi_ui_centers:
+            raise ValueError("--multi_ui_centers is required for Proposed 4.3.")
+        centers_payload = torch.load(args.multi_ui_centers, map_location="cpu")
+        if isinstance(centers_payload, dict):
+            multi_ui_centers_tensor = centers_payload["centers"]
+            ui_center_names = centers_payload.get("names", [])
+        else:
+            multi_ui_centers_tensor = centers_payload
+            ui_center_names = []
+        logging.info(
+            "Loaded multi-UI centers [%d, %d] from %s",
+            multi_ui_centers_tensor.shape[0],
+            multi_ui_centers_tensor.shape[1],
+            args.multi_ui_centers,
+        )
+        margin_loss = MultiUIPerceptibilityCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss(
+            s=args.s,
+            m=args.m,
+            h=args.h,
+            multi_ui_centers=multi_ui_centers_tensor,
+            ui_center_names=ui_center_names,
+            ui_lambda=args.ui_lambda,
+            ui_rho=args.ui_rho,
+            ui_tau_ri=args.ui_tau_ri,
+            ui_tau_easy=args.ui_tau_easy,
+            ui_d_margin=args.ui_d_margin,
+            ui_alpha=args.ui_alpha,
+            ui_beta=args.ui_beta,
+            ui_hard_boost=args.ui_hard_boost,
+            ui_dangerous_downweight=args.ui_dangerous_downweight,
+            ui_sample_weight_min=args.ui_sample_weight_min,
+            t_alpha=args.t_alpha,
+            curriculum_alpha=args.curriculum_alpha,
+            eps=args.eps,
+        )
     else:
         margin_loss = SoftGatedAdaCurricularFaceLoss(
             s=args.s,
@@ -723,7 +803,67 @@ def main():
         fp16=use_amp,
     ).to(device)
 
+    # --- Attention module for Proposed 4.3 ---
+    is_proposed_4_3 = args.loss == "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular"
+    attention_module = None
+    _feature_map_hook_output = [None]
+
+    if is_proposed_4_3 and args.enable_attention:
+        # Register forward hook on layer4 to capture 4D feature map
+        def _feature_map_hook(module, input, output):
+            _feature_map_hook_output[0] = output
+
+        hook_target = None
+        if hasattr(backbone, "layer4"):
+            hook_target = backbone.layer4
+        elif hasattr(backbone, "body"):
+            hook_target = backbone.body
+        else:
+            # Find last module producing 4D output
+            for name, mod in reversed(list(backbone.named_modules())):
+                if isinstance(mod, (torch.nn.Conv2d, torch.nn.BatchNorm2d, torch.nn.Sequential)):
+                    hook_target = mod
+                    break
+
+        if hook_target is None:
+            raise RuntimeError(
+                "Cannot find a suitable module for feature map hook. "
+                "Disable --enable_attention or check backbone architecture."
+            )
+        hook_handle = hook_target.register_forward_hook(_feature_map_hook)
+        logging.info("Feature map hook registered on: %s", type(hook_target).__name__)
+
+        # Infer feature channels via a mini forward
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, args.image_size, args.image_size, device=device)
+            amp_ctx = amp_autocast(use_amp) if device.type == "cuda" else contextlib.nullcontext()
+            with amp_ctx:
+                _ = backbone(dummy_input)
+            if _feature_map_hook_output[0] is None or _feature_map_hook_output[0].ndim != 4:
+                raise RuntimeError(
+                    "Feature hook did not capture a 4D tensor. "
+                    "Check backbone architecture."
+                )
+            feat_channels = _feature_map_hook_output[0].shape[1]
+            _feature_map_hook_output[0] = None  # Clear
+        logging.info("Attention module: in_channels=%d reduction=%d", feat_channels, args.attention_reduction)
+
+        attention_module = PerceptibilityAttentionModule(
+            in_channels=feat_channels,
+            embedding_dim=args.embedding_size,
+            reduction=args.attention_reduction,
+        ).to(device)
+
     optimizer_params, params = split_trainable_parameters(backbone, head, args)
+    # Add attention params to optimizer with head LR
+    if attention_module is not None:
+        attn_lr = args.head_lr
+        optimizer_params.append(
+            {"params": list(attention_module.parameters()), "lr": attn_lr}
+        )
+        params = params + list(attention_module.parameters())
+        logging.info("Attention module parameters added to optimizer with lr=%g", attn_lr)
+
     optimizer = torch.optim.SGD(
         optimizer_params,
         lr=args.lr,
@@ -940,6 +1080,26 @@ def main():
                 else:
                     embeddings = backbone(images)
                 loss, _, norms = head(embeddings, labels)
+
+                # Proposed 4.3: add UI extra loss + attention loss
+                if is_proposed_4_3:
+                    extra_loss = getattr(margin_loss, "_last_extra_loss", None)
+                    if extra_loss is not None:
+                        loss = loss + extra_loss
+                    # Sample weighting
+                    sw = getattr(margin_loss, "_last_sample_weight", None)
+                    if sw is not None:
+                        loss = (loss * sw[labels.view(-1) != -1].mean())
+
+                    if attention_module is not None and _feature_map_hook_output[0] is not None:
+                        feature_map = _feature_map_hook_output[0]
+                        v_prime, _ = margin_loss.compute_ui_suppressed_targets(embeddings)
+                        v_attn = attention_module(feature_map)
+                        L_attn = F.mse_loss(v_attn, v_prime.to(dtype=v_attn.dtype))
+                        loss = loss + args.attention_gamma * L_attn
+                        last_loss_stats["attention_loss"] = float(L_attn.detach().item())
+                        _feature_map_hook_output[0] = None
+
                 loss_stats = getattr(margin_loss, "last_stats", {}) or {}
                 last_loss_stats = dict(loss_stats)
 
