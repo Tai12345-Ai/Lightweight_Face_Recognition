@@ -236,6 +236,7 @@ def exp_dir(config):
             f"_blr_{float_tag(backbone_lr)}"
             f"_hlr_{float_tag(head_lr)}"
         )
+<<<<<<< HEAD
     elif kind == "proposed4_3":
         name = (
             f"{backbone}_proposed4_3_multi_ui_attention"
@@ -246,6 +247,8 @@ def exp_dir(config):
             f"_blr_{float_tag(backbone_lr)}"
             f"_hlr_{float_tag(head_lr)}"
         )
+=======
+>>>>>>> origin/main
     else:
         raise ValueError(f"Unknown RUNNER_KIND: {kind}")
     return output_root(config) / config["OUTPUT_SUBDIR"] / name
@@ -520,6 +523,7 @@ def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, nu
             "--ui_center_update_interval",
             str(config["UI_CENTER_UPDATE_INTERVAL"]),
         ])
+<<<<<<< HEAD
     if config["RUNNER_KIND"] == "proposed4_3":
         cmd.extend([
             "--ui_lambda",
@@ -553,6 +557,8 @@ def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, nu
                 "--attention-reduction",
                 str(config.get("ATTENTION_REDUCTION", 16)),
             ])
+=======
+>>>>>>> origin/main
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
 
     latest = Path(current_exp_dir) / "latest.pt"
@@ -650,8 +656,11 @@ def preflight_compile(config):
         "train_phase2_kaggle.py",
         "train_soft_gated_lambda_kaggle.py",
         "recordio_fallback.py",
+<<<<<<< HEAD
         "perceptibility_attention.py",
         "build_multi_ui_centers.py",
+=======
+>>>>>>> origin/main
         config["RUNNER_FILE"],
         "kaggle_5eval_degraded_common.py",
     ]

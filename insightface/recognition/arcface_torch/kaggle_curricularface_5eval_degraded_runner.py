@@ -24,7 +24,11 @@ from kaggle_5eval_degraded_common import run_5eval_degraded_runner
 RUNNER_FILE = "kaggle_curricularface_5eval_degraded_runner.py"
 RUNNER_KIND = "phase2"
 OUTPUT_SUBDIR = "phase2_loss"
+<<<<<<< HEAD
 BACKUP_ZIP_NAME = "phase2_curricularface_20ep_5eval_degraded_s5.zip"
+=======
+BACKUP_ZIP_NAME = "phase2_curricularface_20ep_5eval_degraded.zip"
+>>>>>>> origin/main
 
 LOSS_NAME = "curricularface"
 BACKBONE = "r18"
@@ -72,7 +76,11 @@ DEGRADED_DEGRADATIONS = [
     "low_illumination",
     "alignment_perturb",
 ]
+<<<<<<< HEAD
 DEGRADED_SEVERITIES = "5"
+=======
+DEGRADED_SEVERITIES = "3"
+>>>>>>> origin/main
 DEGRADED_BATCH_SIZE = 128
 
 run_5eval_degraded_runner(globals())
