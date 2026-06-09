@@ -24,11 +24,7 @@ from kaggle_5eval_degraded_common import run_5eval_degraded_runner
 RUNNER_FILE = "kaggle_proposed_4_2_5eval_degraded_runner.py"
 RUNNER_KIND = "proposed4_2"
 OUTPUT_SUBDIR = "proposed4_2_ui_aware"
-<<<<<<< HEAD
 BACKUP_ZIP_NAME = "proposed4_2_20ep_5eval_degraded_s5.zip"
-=======
-BACKUP_ZIP_NAME = "proposed4_2_20ep_5eval_degraded.zip"
->>>>>>> origin/main
 
 LOSS_NAME = "ui_aware_competition_quality_adaptive_soft_gated_ada_curricular"
 BACKBONE = "r18"
@@ -92,11 +88,7 @@ DEGRADED_DEGRADATIONS = [
     "low_illumination",
     "alignment_perturb",
 ]
-<<<<<<< HEAD
 DEGRADED_SEVERITIES = "5"
-=======
-DEGRADED_SEVERITIES = "3"
->>>>>>> origin/main
 DEGRADED_BATCH_SIZE = 128
 
 run_5eval_degraded_runner(globals())
