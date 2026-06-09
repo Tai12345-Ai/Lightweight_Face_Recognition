@@ -617,7 +617,17 @@ def resolve_resume_path(args, exp_dir: Path) -> Optional[Path]:
     return Path(args.resume)
 
 
-def load_checkpoint_if_requested(args, exp_dir, backbone, head, optimizer, scheduler, scaler):
+def load_checkpoint_if_requested(
+    args,
+    exp_dir,
+    backbone,
+    head,
+    optimizer,
+    scheduler,
+    scaler,
+    attention_module=None,
+    is_proposed_4_3=False,
+):
     resume_path = resolve_resume_path(args, exp_dir)
     if resume_path is None:
         return 0, 0, 0, None, None
@@ -641,6 +651,15 @@ def load_checkpoint_if_requested(args, exp_dir, backbone, head, optimizer, sched
         scheduler.load_state_dict(checkpoint["state_lr_scheduler"])
     if scaler is not None and checkpoint.get("state_scaler") is not None:
         scaler.load_state_dict(checkpoint["state_scaler"])
+    if attention_module is not None:
+        attention_state = checkpoint.get("state_dict_attention")
+        if attention_state is not None:
+            attention_module.load_state_dict(attention_state, strict=True)
+        elif is_proposed_4_3:
+            logging.warning(
+                "Resume checkpoint does not contain state_dict_attention; "
+                "attention_module will start from current initialization."
+            )
 
     start_epoch = int(checkpoint.get("epoch", 0))
     global_step = int(checkpoint.get("global_step", 0))
@@ -890,7 +909,15 @@ def main():
         resumed_metrics,
         resumed_epoch_state,
     ) = load_checkpoint_if_requested(
-        args, exp_dir, backbone, head, optimizer, scheduler, scaler
+        args,
+        exp_dir,
+        backbone,
+        head,
+        optimizer,
+        scheduler,
+        scaler,
+        attention_module=attention_module,
+        is_proposed_4_3=is_proposed_4_3,
     )
     if resume_iteration >= steps_per_epoch:
         start_epoch += 1
@@ -946,6 +973,29 @@ def main():
             args.ui_rho,
             args.ui_tau_ri,
             args.ui_center_update_interval,
+            args.backbone,
+            num_classes,
+            len(dataset),
+            args.batch_size,
+            args.lr,
+            args.backbone_lr,
+            args.head_lr,
+        )
+    elif args.loss == "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
+        logging.info(
+            (
+                "Training loss=%s ui_lambda=%.4f ui_rho=%.4f ui_tau_ri=%.4f "
+                "attention=%s attention_gamma=%.4f attention_reduction=%d "
+                "backbone=%s classes=%d images=%d batch_size=%d "
+                "base_lr=%g backbone_lr=%g head_lr=%g"
+            ),
+            args.loss,
+            args.ui_lambda,
+            args.ui_rho,
+            args.ui_tau_ri,
+            bool(args.enable_attention),
+            args.attention_gamma,
+            args.attention_reduction,
             args.backbone,
             num_classes,
             len(dataset),
@@ -1080,17 +1130,11 @@ def main():
                 else:
                     embeddings = backbone(images)
                 loss, _, norms = head(embeddings, labels)
+                loss_stats = getattr(margin_loss, "last_stats", {}) or {}
+                last_loss_stats = dict(loss_stats)
 
                 # Proposed 4.3: add UI extra loss + attention loss
                 if is_proposed_4_3:
-                    extra_loss = getattr(margin_loss, "_last_extra_loss", None)
-                    if extra_loss is not None:
-                        loss = loss + extra_loss
-                    # Sample weighting
-                    sw = getattr(margin_loss, "_last_sample_weight", None)
-                    if sw is not None:
-                        loss = (loss * sw[labels.view(-1) != -1].mean())
-
                     if attention_module is not None and _feature_map_hook_output[0] is not None:
                         feature_map = _feature_map_hook_output[0]
                         v_prime, _ = margin_loss.compute_ui_suppressed_targets(embeddings)
@@ -1099,9 +1143,6 @@ def main():
                         loss = loss + args.attention_gamma * L_attn
                         last_loss_stats["attention_loss"] = float(L_attn.detach().item())
                         _feature_map_hook_output[0] = None
-
-                loss_stats = getattr(margin_loss, "last_stats", {}) or {}
-                last_loss_stats = dict(loss_stats)
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -1202,6 +1243,8 @@ def main():
                         "sample_count": int(sample_count),
                     },
                 )
+                if attention_module is not None:
+                    checkpoint["state_dict_attention"] = attention_module.state_dict()
                 save_checkpoint(exp_dir / "latest.pt", checkpoint)
                 logging.info(
                     "Saved resumable checkpoint at epoch=%d iter=%d step=%d",
@@ -1326,6 +1369,8 @@ def main():
             config=config,
             metrics=metrics,
         )
+        if attention_module is not None:
+            checkpoint["state_dict_attention"] = attention_module.state_dict()
         save_checkpoint(exp_dir / "latest.pt", checkpoint)
         if args.save_every > 0 and ((epoch + 1) % args.save_every == 0):
             save_checkpoint(exp_dir / f"epoch_{epoch + 1:04d}.pt", checkpoint)

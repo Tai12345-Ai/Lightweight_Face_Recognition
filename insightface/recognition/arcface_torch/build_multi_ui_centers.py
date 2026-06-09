@@ -442,8 +442,8 @@ def main():
     # Global center: mixed degradations.
     if args.include_global:
         logger.info("Computing global center (mixed degradations) ...")
-
-        all_global_embs = []
+        global_sum = None
+        global_count = 0
 
         global_sample_count = max(1, len(sample_items) // max(1, len(degradations)))
         global_sample_items = sample_items[:global_sample_count]
@@ -469,23 +469,36 @@ def main():
 
                 backbone.eval()
 
-                for batch in dl:
-                    batch = batch.to(device, non_blocking=True)
+                with torch.no_grad():
+                    for batch in dl:
+                        batch = batch.to(device, non_blocking=True)
 
-                    if args.fp16 and device.type == "cuda":
-                        with torch.amp.autocast("cuda", enabled=True):
+                        if args.fp16 and device.type == "cuda":
+                            with torch.amp.autocast("cuda", enabled=True):
+                                emb = backbone(batch)
+                        else:
                             emb = backbone(batch)
-                    else:
-                        emb = backbone(batch)
 
-                    all_global_embs.append(F.normalize(emb.float(), dim=1).cpu())
+                        emb = F.normalize(emb.float(), dim=1)
+                        batch_sum = emb.sum(dim=0).detach().cpu()
 
-        if not all_global_embs:
+                        if global_sum is None:
+                            global_sum = batch_sum
+                        else:
+                            global_sum += batch_sum
+
+                        global_count += emb.size(0)
+
+                        del batch, emb
+
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+        if global_sum is None or global_count == 0:
             raise RuntimeError("No global embeddings computed.")
 
-        global_cat = torch.cat(all_global_embs, dim=0)
         global_center = F.normalize(
-            global_cat.mean(dim=0, keepdim=True),
+            (global_sum / float(global_count)).unsqueeze(0),
             dim=1,
         ).squeeze(0)
 

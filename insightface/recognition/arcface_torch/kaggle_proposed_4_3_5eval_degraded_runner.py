@@ -6,16 +6,37 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+import shutil
 
 REPO_URL = "https://github.com/Tai12345-Ai/Lightweight_Face_Recognition.git"
 BRANCH = "main"
 CODE_ROOT = Path("/kaggle/working/Lightweight_Face_Recognition")
 ARCFACE_DIR = CODE_ROOT / "insightface" / "recognition" / "arcface_torch"
 
-if not CODE_ROOT.exists():
-    subprocess.run(["git", "clone", "--branch", BRANCH, REPO_URL, str(CODE_ROOT)], check=True)
+if CODE_ROOT.exists():
+    shutil.rmtree(CODE_ROOT)
+os.chdir("/kaggle/working")
+subprocess.run(["git", "clone", "--branch", BRANCH, REPO_URL, str(CODE_ROOT)], cwd="/kaggle/working", check=True)
+conflict_check = subprocess.run(
+    [
+        "grep",
+        "-R",
+        "-n",
+        "-E",
+        "--include=*.py",
+        "^(>>>>>>)",
+        str(ARCFACE_DIR),
+    ],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+
+if conflict_check.stdout.strip():
+    print(conflict_check.stdout)
+    raise RuntimeError("Repo still contains merge conflict markers.")
 else:
-    subprocess.run(["git", "pull", "--ff-only"], cwd=CODE_ROOT, check=True)
+    print("No conflict markers found.")
 os.chdir(ARCFACE_DIR)
 sys.path.insert(0, str(ARCFACE_DIR))
 
