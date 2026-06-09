@@ -24,7 +24,7 @@ conflict_check = subprocess.run(
         "-n",
         "-E",
         "--include=*.py",
-        "^(>>>>>>)",
+        "^(<<<<<<<|=======|>>>>>>>)",
         str(ARCFACE_DIR),
     ],
     check=False,
