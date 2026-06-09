@@ -853,18 +853,38 @@ def main():
         logging.info("Feature map hook registered on: %s", type(hook_target).__name__)
 
         # Infer feature channels via a mini forward
+        was_training = backbone.training
+        backbone.eval()
+
         with torch.no_grad():
-            dummy_input = torch.randn(1, 3, args.image_size, args.image_size, device=device)
-            amp_ctx = amp_autocast(use_amp) if device.type == "cuda" else contextlib.nullcontext()
-            with amp_ctx:
+            dummy_input = torch.zeros(
+                2,
+                3,
+                args.image_size,
+                args.image_size,
+                device=device,
+                dtype=torch.float32,
+            )
+
+            if args.fp16 and device.type == "cuda":
+                with torch.amp.autocast("cuda", enabled=True):
+                    _ = backbone(dummy_input)
+            else:
                 _ = backbone(dummy_input)
-            if _feature_map_hook_output[0] is None or _feature_map_hook_output[0].ndim != 4:
-                raise RuntimeError(
-                    "Feature hook did not capture a 4D tensor. "
-                    "Check backbone architecture."
-                )
-            feat_channels = _feature_map_hook_output[0].shape[1]
-            _feature_map_hook_output[0] = None  # Clear
+
+        if was_training:
+            backbone.train()
+
+        del dummy_input
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        if _feature_map_hook_output[0] is None or _feature_map_hook_output[0].ndim != 4:
+            raise RuntimeError(
+                "Feature hook did not capture a 4D tensor. "
+                "Check backbone architecture."
+            )
+        feat_channels = _feature_map_hook_output[0].shape[1]
         logging.info("Attention module: in_channels=%d reduction=%d", feat_channels, args.attention_reduction)
 
         attention_module = PerceptibilityAttentionModule(
@@ -872,6 +892,7 @@ def main():
             embedding_dim=args.embedding_size,
             reduction=args.attention_reduction,
         ).to(device)
+        _feature_map_hook_output[0] = None
 
     optimizer_params, params = split_trainable_parameters(backbone, head, args)
     # Add attention params to optimizer with head LR
