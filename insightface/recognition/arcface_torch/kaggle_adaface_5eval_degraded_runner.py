@@ -16,10 +16,11 @@ if not CODE_ROOT.exists():
     subprocess.run(["git", "clone", "--branch", BRANCH, REPO_URL, str(CODE_ROOT)], check=True)
 else:
     subprocess.run(["git", "pull", "--ff-only"], cwd=CODE_ROOT, check=True)
+
 os.chdir(ARCFACE_DIR)
 sys.path.insert(0, str(ARCFACE_DIR))
 
-from kaggle_5eval_degraded_common import run_5eval_degradeAd_runner
+from kaggle_5eval_degraded_common import run_5eval_degraded_runner
 
 RUNNER_FILE = "kaggle_adaface_5eval_degraded_runner.py"
 RUNNER_KIND = "phase2"
@@ -27,6 +28,7 @@ OUTPUT_SUBDIR = "phase2_loss"
 BACKUP_ZIP_NAME = "phase2_adaface_20ep_5eval_degraded_s5.zip"
 
 LOSS_NAME = "adaface"
+
 BACKBONE = "r18"
 EPOCHS = 20
 BATCH_SIZE = 128
@@ -39,6 +41,7 @@ SAVE_EVERY_STEPS = 300
 NUM_WORKERS = 2
 USE_FP16 = True
 MAX_TRAIN_MINUTES = 600
+GENERATE_REPORT = True
 
 EVAL_TARGETS = [
     "lfw",
@@ -48,22 +51,10 @@ EVAL_TARGETS = [
     "calfw",
 ]
 VAL_TARGETS = EVAL_TARGETS
-HQ_EVAL_TARGETS = [
-    "lfw",
-    "cfp_fp",
-    "cplfw",
-    "agedb_30",
-    "calfw",
-]
+HQ_EVAL_TARGETS = EVAL_TARGETS
 
 RUN_DEGRADED_EVAL = True
-DEGRADED_TARGETS = [
-    "lfw",
-    "cfp_fp",
-    "cplfw",
-    "agedb_30",
-    "calfw",
-]
+DEGRADED_TARGETS = EVAL_TARGETS
 DEGRADED_DEGRADATIONS = [
     "gaussian_blur",
     "motion_blur",
