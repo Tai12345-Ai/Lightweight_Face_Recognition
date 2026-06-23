@@ -20,7 +20,7 @@ DEFAULT_EVAL_DIR = INPUT_ROOT / "CASIA-WebFace" / "eval"
 DEFAULT_PRETRAINED_BACKBONE = INPUT_ROOT / "backbone" / "backbone.pth"
 EXPERIMENTS_ROOT = Path("/kaggle/working/experiments")
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def run(cmd, cwd=None, check=True):
@@ -55,10 +55,7 @@ def has_imagefolder_train_data(path):
         return False
     for class_dir in class_dirs[:20]:
         try:
-            if any(
-                item.is_file() and item.suffix.lower() in IMAGE_EXTS
-                for item in class_dir.iterdir()
-            ):
+            if any(item.is_file() and item.suffix.lower() in IMAGE_EXTS for item in class_dir.iterdir()):
                 return True
         except OSError:
             continue
@@ -72,7 +69,6 @@ def has_train_data(path):
 def input_dirs(max_depth=2):
     if not INPUT_ROOT.exists():
         return []
-
     dirs = []
 
     def visit(path, depth):
@@ -126,7 +122,7 @@ def resolve_train_data_dir(preferred):
 
 
 def eval_dir_has_targets(path, targets):
-    return path.is_dir() and all((path / f"{target}.bin").exists() for target in targets)
+    return Path(path).is_dir() and all((Path(path) / f"{target}.bin").exists() for target in targets)
 
 
 def resolve_eval_dir(train_dir, targets):
@@ -261,7 +257,7 @@ def read_epoch_count(metrics_path):
 
 
 def is_complete(config, current_exp_dir):
-    return read_epoch_count(Path(current_exp_dir) / "metrics.json") >= config["EPOCHS"]
+    return read_epoch_count(Path(current_exp_dir) / "metrics.json") >= int(config["EPOCHS"])
 
 
 def copy_restored_output(config, source):
@@ -332,7 +328,7 @@ def complete_accuracy_mean(eval_metrics, targets):
 
 
 def run_degraded_eval(config, current_exp_dir, eval_dir):
-    if not config["RUN_DEGRADED_EVAL"]:
+    if not config.get("RUN_DEGRADED_EVAL", True):
         return
 
     best_checkpoint = Path(current_exp_dir) / "best.pth"
@@ -353,6 +349,8 @@ def run_degraded_eval(config, current_exp_dir, eval_dir):
             f"{eval_dir}: {', '.join(missing_bins)}"
         )
 
+    import torch
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     degraded_cmd = [
         sys.executable,
@@ -372,13 +370,13 @@ def run_degraded_eval(config, current_exp_dir, eval_dir):
         "--degradations",
         ",".join(config["DEGRADED_DEGRADATIONS"]),
         "--severities",
-        config["DEGRADED_SEVERITIES"],
+        str(config["DEGRADED_SEVERITIES"]),
         "--batch-size",
         str(config["DEGRADED_BATCH_SIZE"]),
         "--device",
         device,
     ]
-    if config["USE_FP16"]:
+    if config.get("USE_FP16", True):
         degraded_cmd.append("--fp16")
     run(degraded_cmd, cwd=ARCFACE_DIR)
 
@@ -414,36 +412,24 @@ def add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes):
     }
     names = option_names["phase2" if config["RUNNER_KIND"] == "phase2" else "proposed"]
     cmd.extend([
-        names["batch_size"],
-        str(config["BATCH_SIZE"]),
-        "--lr",
-        str(config["HEAD_LR"]),
-        names["backbone_lr"],
-        str(config["BACKBONE_LR"]),
-        names["head_lr"],
-        str(config["HEAD_LR"]),
-        names["warmup_epochs"],
-        str(config["WARMUP_EPOCHS"]),
-        names["eval_every"],
-        str(config["EVAL_EVERY"]),
-        names["save_every"],
-        str(config["SAVE_EVERY_EPOCHS"]),
-        names["save_every_steps"],
-        str(config["SAVE_EVERY_STEPS"]),
-        names["max_train_minutes"],
-        str(config["MAX_TRAIN_MINUTES"]),
-        names["num_workers"],
-        str(config["NUM_WORKERS"]),
-        names["num_classes"],
-        str(num_classes),
-        names["eval_targets"],
-        ",".join(config["VAL_TARGETS"]),
+        names["batch_size"], str(config["BATCH_SIZE"]),
+        "--lr", str(config["HEAD_LR"]),
+        names["backbone_lr"], str(config["BACKBONE_LR"]),
+        names["head_lr"], str(config["HEAD_LR"]),
+        names["warmup_epochs"], str(config["WARMUP_EPOCHS"]),
+        names["eval_every"], str(config["EVAL_EVERY"]),
+        names["save_every"], str(config["SAVE_EVERY_EPOCHS"]),
+        names["save_every_steps"], str(config["SAVE_EVERY_STEPS"]),
+        names["max_train_minutes"], str(config["MAX_TRAIN_MINUTES"]),
+        names["num_workers"], str(config["NUM_WORKERS"]),
+        names["num_classes"], str(num_classes),
+        names["eval_targets"], ",".join(config["VAL_TARGETS"]),
     ])
     if config["RUNNER_KIND"] == "phase2":
         cmd.extend(["--data-dir", str(train_data_dir), "--eval-dir", str(eval_dir)])
     else:
         cmd.extend(["--train_data", str(train_data_dir), "--eval_dir", str(eval_dir)])
-    if config["USE_FP16"]:
+    if config.get("USE_FP16", True):
         cmd.append("--fp16")
     return cmd
 
@@ -493,66 +479,44 @@ def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, nu
         "--epochs",
         str(config["EPOCHS"]),
     ]
+
     if config["RUNNER_KIND"] == "proposed4_2":
         cmd.extend([
-            "--ui_lambda",
-            str(config["UI_LAMBDA"]),
-            "--ui_rho",
-            str(config["UI_RHO"]),
-            "--ui_tau_ri",
-            str(config["UI_TAU_RI"]),
-            "--ui_tau_easy",
-            str(config["UI_TAU_EASY"]),
-            "--ui_d_margin",
-            str(config["UI_D_MARGIN"]),
-            "--ui_alpha",
-            str(config["UI_ALPHA"]),
-            "--ui_beta",
-            str(config["UI_BETA"]),
-            "--ui_hard_boost",
-            str(config["UI_HARD_BOOST"]),
-            "--ui_dangerous_downweight",
-            str(config["UI_DANGEROUS_DOWNWEIGHT"]),
-            "--ui_sample_weight_min",
-            str(config["UI_SAMPLE_WEIGHT_MIN"]),
-            "--ui_center_momentum",
-            str(config["UI_CENTER_MOMENTUM"]),
-            "--ui_center_update_interval",
-            str(config["UI_CENTER_UPDATE_INTERVAL"]),
+            "--ui_lambda", str(config["UI_LAMBDA"]),
+            "--ui_rho", str(config["UI_RHO"]),
+            "--ui_tau_ri", str(config["UI_TAU_RI"]),
+            "--ui_tau_easy", str(config["UI_TAU_EASY"]),
+            "--ui_d_margin", str(config["UI_D_MARGIN"]),
+            "--ui_alpha", str(config["UI_ALPHA"]),
+            "--ui_beta", str(config["UI_BETA"]),
+            "--ui_hard_boost", str(config["UI_HARD_BOOST"]),
+            "--ui_dangerous_downweight", str(config["UI_DANGEROUS_DOWNWEIGHT"]),
+            "--ui_sample_weight_min", str(config["UI_SAMPLE_WEIGHT_MIN"]),
+            "--ui_center_momentum", str(config["UI_CENTER_MOMENTUM"]),
+            "--ui_center_update_interval", str(config["UI_CENTER_UPDATE_INTERVAL"]),
         ])
+
     if config["RUNNER_KIND"] == "proposed4_3":
         cmd.extend([
-            "--ui_lambda",
-            str(config["UI_LAMBDA"]),
-            "--ui_rho",
-            str(config["UI_RHO"]),
-            "--ui_tau_ri",
-            str(config["UI_TAU_RI"]),
-            "--ui_tau_easy",
-            str(config["UI_TAU_EASY"]),
-            "--ui_d_margin",
-            str(config["UI_D_MARGIN"]),
-            "--ui_alpha",
-            str(config["UI_ALPHA"]),
-            "--ui_beta",
-            str(config["UI_BETA"]),
-            "--ui_hard_boost",
-            str(config["UI_HARD_BOOST"]),
-            "--ui_dangerous_downweight",
-            str(config["UI_DANGEROUS_DOWNWEIGHT"]),
-            "--ui_sample_weight_min",
-            str(config["UI_SAMPLE_WEIGHT_MIN"]),
-            "--multi-ui-centers",
-            str(config["MULTI_UI_CENTERS"]),
+            "--ui_lambda", str(config["UI_LAMBDA"]),
+            "--ui_rho", str(config["UI_RHO"]),
+            "--ui_tau_ri", str(config["UI_TAU_RI"]),
+            "--ui_tau_easy", str(config["UI_TAU_EASY"]),
+            "--ui_d_margin", str(config["UI_D_MARGIN"]),
+            "--ui_alpha", str(config["UI_ALPHA"]),
+            "--ui_beta", str(config["UI_BETA"]),
+            "--ui_hard_boost", str(config["UI_HARD_BOOST"]),
+            "--ui_dangerous_downweight", str(config["UI_DANGEROUS_DOWNWEIGHT"]),
+            "--ui_sample_weight_min", str(config["UI_SAMPLE_WEIGHT_MIN"]),
+            "--multi-ui-centers", str(config["MULTI_UI_CENTERS"]),
         ])
         if config.get("ENABLE_ATTENTION", False):
             cmd.append("--enable-attention")
             cmd.extend([
-                "--attention-gamma",
-                str(config.get("ATTENTION_GAMMA", 0.05)),
-                "--attention-reduction",
-                str(config.get("ATTENTION_REDUCTION", 16)),
+                "--attention-gamma", str(config.get("ATTENTION_GAMMA", 0.05)),
+                "--attention-reduction", str(config.get("ATTENTION_REDUCTION", 16)),
             ])
+
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
 
     latest = Path(current_exp_dir) / "latest.pt"
@@ -577,7 +541,7 @@ def export_eval_csv(config):
         import pandas as pd
     except Exception as exc:
         print("Could not import pandas; skipping CSV export:", exc)
-        return
+        return None
 
     rows = []
     metrics_root = output_root(config) / config["OUTPUT_SUBDIR"]
@@ -609,10 +573,37 @@ def export_eval_csv(config):
     print("Saved:", out_csv)
     try:
         from IPython.display import FileLink, display
-
         display(FileLink(str(out_csv)))
     except Exception as exc:
         print("Could not render CSV download link:", exc)
+    return out_csv
+
+
+def write_manifest(config, current_exp_dir, train_data_dir, eval_dir, num_classes):
+    manifest = {
+        "runner_file": config.get("RUNNER_FILE"),
+        "runner_kind": config.get("RUNNER_KIND"),
+        "loss_name": config.get("LOSS_NAME"),
+        "backbone": config.get("BACKBONE"),
+        "epochs_requested": int(config.get("EPOCHS", 0)),
+        "epochs_recorded": read_epoch_count(Path(current_exp_dir) / "metrics.json"),
+        "train_data_dir": str(train_data_dir),
+        "eval_dir": str(eval_dir),
+        "num_classes": int(num_classes),
+        "experiment_dir": str(current_exp_dir),
+        "latest_checkpoint": str(Path(current_exp_dir) / "latest.pt"),
+        "best_checkpoint": str(Path(current_exp_dir) / "best.pth"),
+        "eval_targets": list(config.get("EVAL_TARGETS", [])),
+        "degraded_targets": list(config.get("DEGRADED_TARGETS", [])),
+        "degraded_degradations": list(config.get("DEGRADED_DEGRADATIONS", [])),
+        "degraded_severities": str(config.get("DEGRADED_SEVERITIES", "")),
+        "backup_zip_name": config.get("BACKUP_ZIP_NAME"),
+    }
+    out = Path(current_exp_dir) / "run_manifest.json"
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print("Saved:", out)
+    return out
 
 
 def write_backup(config):
@@ -623,7 +614,7 @@ def write_backup(config):
     output_subdir = output_root(config) / config["OUTPUT_SUBDIR"]
     if not output_subdir.exists():
         print("No outputs to back up yet:", output_subdir)
-        return
+        return None
 
     shutil.make_archive(
         str(zip_path.with_suffix("")),
@@ -635,10 +626,10 @@ def write_backup(config):
     print("Size MB:", zip_path.stat().st_size / 1024 / 1024)
     try:
         from IPython.display import FileLink, display
-
         display(FileLink(str(zip_path)))
     except Exception as exc:
         print("Could not render backup download link:", exc)
+    return zip_path
 
 
 def preflight_compile(config):
@@ -652,11 +643,29 @@ def preflight_compile(config):
         "recordio_fallback.py",
         "perceptibility_attention.py",
         "build_multi_ui_centers.py",
+        "kaggle_proposed_4_3_core_report.py",
         config["RUNNER_FILE"],
         "kaggle_5eval_degraded_common.py",
     ]
     compile_files = [name for name in compile_files if (ARCFACE_DIR / name).exists()]
     run([sys.executable, "-m", "py_compile"] + compile_files, cwd=ARCFACE_DIR)
+
+
+def generate_report(config):
+    if not config.get("GENERATE_REPORT", True):
+        return None
+    try:
+        from kaggle_proposed_4_3_core_report import make_report
+        return make_report(
+            backup_zip_name=config["BACKUP_ZIP_NAME"],
+            output_subdir=config["OUTPUT_SUBDIR"],
+            eval_targets=config["EVAL_TARGETS"],
+            degraded_targets=config.get("DEGRADED_TARGETS", []),
+            degraded_degradations=config.get("DEGRADED_DEGRADATIONS", []),
+        )
+    except Exception as exc:
+        print("[WARN] Could not generate plots/report:", repr(exc))
+        return None
 
 
 def run_5eval_degraded_runner(config):
@@ -669,6 +678,8 @@ def run_5eval_degraded_runner(config):
     config.setdefault("S", 64.0)
     config.setdefault("M", 0.4)
     config.setdefault("H", 0.333)
+    config.setdefault("GENERATE_REPORT", True)
+    config.setdefault("RUN_DEGRADED_EVAL", True)
 
     if not CODE_ROOT.exists():
         run(["git", "clone", "--branch", BRANCH, REPO_URL, str(CODE_ROOT)])
@@ -688,6 +699,8 @@ def run_5eval_degraded_runner(config):
         "onnx",
         "opencv-python",
         "scikit-learn",
+        "pandas",
+        "matplotlib",
     ])
 
     train_data_dir = resolve_train_data_dir(config["TRAIN_DATA_DIR"])
@@ -698,7 +711,6 @@ def run_5eval_degraded_runner(config):
     restore_previous_outputs(config)
     preflight_compile(config)
 
-    global torch
     import torch
 
     print("TRAIN_DATA_DIR:", train_data_dir)
@@ -710,6 +722,7 @@ def run_5eval_degraded_runner(config):
     print("EVAL_TARGETS:", ",".join(config["EVAL_TARGETS"]))
     print("DEGRADED_TARGETS:", ",".join(config["DEGRADED_TARGETS"]))
     print("DEGRADED_DEGRADATIONS:", ",".join(config["DEGRADED_DEGRADATIONS"]))
+    print("DEGRADED_SEVERITIES:", str(config["DEGRADED_SEVERITIES"]))
     print("BACKUP_ZIP_NAME:", config["BACKUP_ZIP_NAME"])
     print("PyTorch:", torch.__version__)
     print("CUDA available:", torch.cuda.is_available())
@@ -728,13 +741,7 @@ def run_5eval_degraded_runner(config):
             f"[TRAIN] loss={config['LOSS_NAME']} epochs={config['EPOCHS']} "
             f"backbone_lr={config['BACKBONE_LR']} head_lr={config['HEAD_LR']}"
         )
-        train_cmd = build_train_command(
-            config,
-            current_exp_dir,
-            train_data_dir,
-            eval_dir,
-            num_classes,
-        )
+        train_cmd = build_train_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes)
         run(train_cmd, cwd=ARCFACE_DIR)
         if is_complete(config, current_exp_dir):
             run_degraded_eval(config, current_exp_dir, eval_dir)
@@ -748,8 +755,12 @@ def run_5eval_degraded_runner(config):
     print("latest.pt:", (current_exp_dir / "latest.pt").exists())
     print("best.pth:", (current_exp_dir / "best.pth").exists())
 
+    write_manifest(config, current_exp_dir, train_data_dir, eval_dir, num_classes)
     export_eval_csv(config)
-    write_backup(config)
+    report_zip = generate_report(config)
+    backup_zip = write_backup(config)
 
     elapsed_minutes = (time.time() - start_time) / 60.0
+    print("REPORT_ZIP:", report_zip)
+    print("BACKUP_ZIP:", backup_zip)
     print(f"Done. Elapsed minutes: {elapsed_minutes:.1f}")
