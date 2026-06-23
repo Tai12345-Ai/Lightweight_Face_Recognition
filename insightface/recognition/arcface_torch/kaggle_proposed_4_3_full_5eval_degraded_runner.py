@@ -23,7 +23,26 @@ subprocess.run([
     "tensorboard", "easydict", "onnx", "opencv-python", "scikit-learn", "pandas", "matplotlib",
 ], check=True)
 
-from kaggle_5eval_degraded_common import run_5eval_degraded_runner, run
+import kaggle_5eval_degraded_common as common
+
+# Force this runner to use the Full-v1 trainer wrapper while keeping common restore/eval/backup logic.
+_original_build_proposed_command = common.build_proposed_command
+
+
+def _build_full_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes):
+    cmd = _original_build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes)
+    for i, item in enumerate(cmd):
+        if str(item) == "train_soft_gated_lambda_kaggle.py":
+            cmd[i] = "train_proposed_4_3_full_kaggle.py"
+            break
+    else:
+        raise RuntimeError("Could not replace train_soft_gated_lambda_kaggle.py with Full trainer wrapper.")
+    return cmd
+
+
+common.build_proposed_command = _build_full_proposed_command
+run_5eval_degraded_runner = common.run_5eval_degraded_runner
+run = common.run
 
 
 def find_train_data_dir():
