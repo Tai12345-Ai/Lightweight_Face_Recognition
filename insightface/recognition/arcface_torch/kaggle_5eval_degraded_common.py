@@ -318,9 +318,10 @@ def run_degraded_eval(config, current_exp_dir, eval_dir):
 
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    degraded_script = config.get("DEGRADED_EVAL_SCRIPT", "eval_degraded_6phase2.py")
     degraded_cmd = [
         sys.executable,
-        "eval_degraded_6phase2.py",
+        degraded_script,
         "--backbone", config["BACKBONE"],
         "--checkpoint", str(best_checkpoint),
         "--checkpoint-label", Path(current_exp_dir).name,
@@ -431,6 +432,18 @@ def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, nu
         if config.get("ENABLE_ATTENTION", False):
             cmd.append("--enable-attention")
             cmd.extend(["--attention-gamma", str(config.get("ATTENTION_GAMMA", 0.05)), "--attention-reduction", str(config.get("ATTENTION_REDUCTION", 16))])
+        if "ATTENTION_ALPHA" in config:
+            cmd.extend(["--attention-alpha", str(config["ATTENTION_ALPHA"])])
+        if config.get("CENTERED_ATTENTION", False):
+            cmd.append("--centered-attention")
+        if "RI_LAMBDA" in config:
+            cmd.extend(["--ri-lambda", str(config["RI_LAMBDA"])])
+        if "ATTENTION_SPATIAL_LAMBDA" in config:
+            cmd.extend(["--attention-spatial-lambda", str(config["ATTENTION_SPATIAL_LAMBDA"])])
+        if "ATTENTION_CHANNEL_LAMBDA" in config:
+            cmd.extend(["--attention-channel-lambda", str(config["ATTENTION_CHANNEL_LAMBDA"])])
+        if "ATTENTION_TV_LAMBDA" in config:
+            cmd.extend(["--attention-tv-lambda", str(config["ATTENTION_TV_LAMBDA"])])
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
     latest = Path(current_exp_dir) / "latest.pt"
     if latest.exists():
@@ -540,12 +553,17 @@ def preflight_compile(config):
     compile_files = [
         "degradation/transforms.py",
         "eval_degraded_6phase2.py",
+        "eval_degraded_proposed_4_3_full.py",
         "losses_extended.py",
         "soft_gated_losses.py",
         "train_phase2_kaggle.py",
         "train_soft_gated_lambda_kaggle.py",
+        "train_proposed_4_3_core_kaggle.py",
+        "train_proposed_4_3_full_kaggle.py",
         "recordio_fallback.py",
         "perceptibility_attention.py",
+        "proposed_4_3_attention_model.py",
+        "proposed_4_3_full_loss.py",
         "build_multi_ui_centers.py",
         "kaggle_proposed_4_3_core_report.py",
         config["RUNNER_FILE"],

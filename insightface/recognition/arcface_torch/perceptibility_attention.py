@@ -1,10 +1,13 @@
-"""Perceptibility Attention Module for Proposed 4.3.
+"""Perceptibility attention modules for Proposed 4.3.
 
-Implements CBAM-style channel + spatial attention on the backbone feature map,
-producing a normalized auxiliary embedding for training-time UI suppression.
-
-Reference: Woo et al., 2304.10066v1 (CBAM-inspired perceptibility attention).
+The original trainer used this module as an auxiliary embedding head.  The
+Core/Full 4.3++ path also needs the attention map itself so it can build
+``F' = F * (1 + alpha * rho_att * M)`` before the embedding head.  The old
+``forward`` behavior is kept for compatibility, while new methods expose the
+map, feature amplification and regularization terms.
 """
+
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
@@ -47,14 +50,7 @@ class PerceptibilityAttentionModule(nn.Module):
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(in_channels, embedding_dim)
 
-    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            feature_map: [B, C, H, W]
-
-        Returns:
-            v_attn: [B, embedding_dim], L2-normalized
-        """
+    def attention_maps(self, feature_map: torch.Tensor):
         if feature_map.ndim != 4:
             raise ValueError(
                 f"PerceptibilityAttentionModule expects 4D input [B,C,H,W], got {feature_map.shape}"
@@ -74,7 +70,89 @@ class PerceptibilityAttentionModule(nn.Module):
         A_s = torch.sigmoid(
             self.spatial_conv(torch.cat([avg_s, max_s], dim=1))
         )  # [B, 1, H, W]
-        F_attn = A_s * F_c  # [B, C, H, W]
+        M = A_c * A_s  # [B, C, H, W]
+
+        return {
+            "channel": A_c,
+            "spatial": A_s,
+            "combined": M,
+        }
+
+    def apply_attention(
+        self,
+        feature_map: torch.Tensor,
+        rho_att: torch.Tensor | None = None,
+        alpha: float = 1.0,
+        centered: bool = False,
+    ):
+        maps = self.attention_maps(feature_map)
+        M = maps["combined"]
+        if centered:
+            M_eff = M - M.mean(dim=(1, 2, 3), keepdim=True)
+        else:
+            M_eff = M
+
+        if rho_att is None:
+            rho = torch.ones(
+                feature_map.shape[0],
+                1,
+                1,
+                1,
+                device=feature_map.device,
+                dtype=feature_map.dtype,
+            )
+        else:
+            rho = rho_att.to(device=feature_map.device, dtype=feature_map.dtype).view(-1, 1, 1, 1)
+
+        scale = 1.0 + float(alpha) * rho * M_eff.to(dtype=feature_map.dtype)
+        feature_prime = feature_map * scale
+        maps["effective"] = M_eff
+        maps["scale"] = scale
+        return feature_prime, maps
+
+    @staticmethod
+    def regularization(
+        maps,
+        lambda_spatial: float = 0.0,
+        lambda_channel: float = 0.0,
+        lambda_tv: float = 0.0,
+    ):
+        spatial = maps["spatial"].float()
+        channel = maps["channel"].float()
+        l_spatial = spatial.mean()
+        l_channel = channel.mean()
+        if spatial.shape[-2] > 1:
+            tv_h = (spatial[:, :, 1:, :] - spatial[:, :, :-1, :]).abs().mean()
+        else:
+            tv_h = spatial.new_zeros(())
+        if spatial.shape[-1] > 1:
+            tv_w = (spatial[:, :, :, 1:] - spatial[:, :, :, :-1]).abs().mean()
+        else:
+            tv_w = spatial.new_zeros(())
+        l_tv = tv_h + tv_w
+        total = (
+            float(lambda_spatial) * l_spatial
+            + float(lambda_channel) * l_channel
+            + float(lambda_tv) * l_tv
+        )
+        stats = {
+            "attention_spatial_mean": l_spatial.detach(),
+            "attention_channel_mean": l_channel.detach(),
+            "attention_tv": l_tv.detach(),
+        }
+        return total, stats
+
+    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            feature_map: [B, C, H, W]
+
+        Returns:
+            v_attn: [B, embedding_dim], L2-normalized. Kept for the old
+            auxiliary MSE branch.
+        """
+        maps = self.attention_maps(feature_map)
+        F_attn = maps["combined"] * feature_map  # [B, C, H, W]
 
         # --- Embedding projection ---
         pooled = self.gap(F_attn).flatten(1)  # [B, C]
@@ -82,3 +160,27 @@ class PerceptibilityAttentionModule(nn.Module):
         v_attn = F.normalize(z_attn, dim=1)
 
         return v_attn
+
+
+class RecoverabilityPredictor(nn.Module):
+    """Predict a scalar RI logit from a backbone feature map."""
+
+    def __init__(self, in_channels: int, hidden_dim: int = 128):
+        super().__init__()
+        if in_channels <= 0:
+            raise ValueError(f"in_channels must be positive, got {in_channels}")
+        hidden_dim = max(1, int(hidden_dim))
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.net = nn.Sequential(
+            nn.Linear(in_channels, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
+        if feature_map.ndim != 4:
+            raise ValueError(
+                f"RecoverabilityPredictor expects 4D input [B,C,H,W], got {feature_map.shape}"
+            )
+        pooled = self.gap(feature_map).flatten(1)
+        return self.net(pooled.float()).view(-1)

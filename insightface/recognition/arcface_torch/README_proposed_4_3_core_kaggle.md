@@ -15,35 +15,28 @@ kaggle_proposed_4_3_core_report.py
 
 Run the runner as a Kaggle notebook/script.
 
-## What this Core-v0 does in the current repo
+## What this Core runner does
 
 The current repo already has:
 
 - `train_soft_gated_lambda_kaggle.py`
+- `train_proposed_4_3_core_kaggle.py`
 - `kaggle_5eval_degraded_common.py`
 - `build_multi_ui_centers.py`
-- `eval_degraded_6phase2.py`
+- `eval_degraded_proposed_4_3_full.py`
 
-This runner reuses that infrastructure. It configures Proposed 4.3 as a practical Core-v0 by:
+This runner reuses that infrastructure and routes Proposed 4.3 through the Core wrapper:
 
 - using `LOSS_NAME = "proposed_4_3_multi_ui_attention"`;
-- setting `UI_LAMBDA = 0.0` to disable explicit UI extra loss;
-- enabling attention with `ENABLE_ATTENTION = True`;
+- setting `UI_LAMBDA = 0.0` because Core intentionally disables UI-orthogonal loss;
+- enabling the true feature-map path `F -> attention -> F' -> x'`;
+- training RI predictor, weighted FR, preserve, identity-anchor and attention regularization;
 - training 20 epochs from `backbone.pth`;
 - running the 5 clean evals;
-- running synthetic degraded eval at severity 5;
+- running synthetic degraded eval with the attention wrapper;
 - exporting CSV + plots + zip backup.
 
-## Important note
-
-This is runnable with the current repo design. It is not yet the full mathematical Core from the document because the repo trainer does not yet expose explicit:
-
-- RI predictor loss;
-- preserve loss;
-- identity-anchor loss;
-- Delta C / Delta N / Delta U diagnostics.
-
-Those need a deeper `train_soft_gated_lambda_kaggle.py` patch.
+Core intentionally does not use UI-orthogonal regularization, negative-guard loss, channel attention as a required component, or EMA UI prototype updates.
 
 ## Minimum metrics to keep
 

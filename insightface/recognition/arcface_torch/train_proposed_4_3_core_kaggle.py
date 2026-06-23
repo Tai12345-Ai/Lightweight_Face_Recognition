@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Trainer wrapper for Proposed 4.3++ Full.
+"""Trainer wrapper for Proposed 4.3++ Core.
 
-The base Kaggle trainer is reused for CLI, data loading, logging, resume and
-checkpointing.  This wrapper replaces only the Proposed 4.3 runtime pieces:
-
-1) get_model() returns a backbone wrapper that computes F -> M -> F' -> x';
-2) the Proposed 4.3 loss is replaced by the Full identity-safe objective;
-3) MarginSoftmaxHead.forward passes the wrapper context and normalized class
-   weights to the loss.
+Core uses the true F -> attention -> F' -> x' path, RI predictor, weighted FR,
+preserve, identity-anchor and attention regularization.  It keeps
+UI-orthogonal and negative-guard disabled so the objective matches the Core
+specification.
 """
 
 from __future__ import annotations
@@ -17,7 +14,7 @@ import torch.nn.functional as F
 
 import train_soft_gated_lambda_kaggle as base
 import soft_gated_losses
-from proposed_4_3_full_loss import Proposed43FullIdentitySafeLoss
+from proposed_4_3_full_loss import Proposed43CoreIdentitySafeLoss
 from proposed_4_3_attention_model import (
     Proposed43AttentionBackbone,
     get_last_attention_context,
@@ -27,30 +24,30 @@ from proposed_4_3_attention_model import (
 
 _ORIGINAL_PARSE_ARGS = base.parse_args
 _ORIGINAL_GET_MODEL = base.get_model
-_FULL_ARGS = None
+_CORE_ARGS = None
 
 
-class _ConfiguredFullLoss(Proposed43FullIdentitySafeLoss):
+class _ConfiguredCoreLoss(Proposed43CoreIdentitySafeLoss):
     def __init__(self, *args, **kwargs):
-        if _FULL_ARGS is not None:
-            kwargs.setdefault("ri_lambda", float(getattr(_FULL_ARGS, "ri_lambda", 0.05)))
+        kwargs["ui_lambda"] = 0.0
+        kwargs["neg_lambda"] = 0.0
+        if _CORE_ARGS is not None:
+            kwargs.setdefault("ri_lambda", float(getattr(_CORE_ARGS, "ri_lambda", 0.05)))
         super().__init__(*args, **kwargs)
 
 
-def _full_parse_args():
-    global _FULL_ARGS
+def _core_parse_args():
+    global _CORE_ARGS
     args = _ORIGINAL_PARSE_ARGS()
-    # The Full wrapper owns the real attention path.  Disable the legacy
-    # auxiliary MSE hook in train_soft_gated_lambda_kaggle.py.
     args.enable_attention = False
-    args.centered_attention = True
-    _FULL_ARGS = args
+    args.centered_attention = False
+    _CORE_ARGS = args
     return args
 
 
-def _full_get_model(name, **kwargs):
+def _core_get_model(name, **kwargs):
     raw_backbone = _ORIGINAL_GET_MODEL(name, **kwargs)
-    args = _FULL_ARGS
+    args = _CORE_ARGS
     image_size = int(getattr(args, "image_size", 112)) if args is not None else 112
     feature_channels = infer_feature_channels(raw_backbone, image_size=image_size)
     embedding_dim = int(kwargs.get("num_features", getattr(args, "embedding_size", 512)))
@@ -60,14 +57,14 @@ def _full_get_model(name, **kwargs):
         embedding_dim=embedding_dim,
         attention_reduction=int(getattr(args, "attention_reduction", 16)),
         attention_alpha=float(getattr(args, "attention_alpha", 0.25)),
-        centered_attention=True,
+        centered_attention=False,
         attention_spatial_lambda=float(getattr(args, "attention_spatial_lambda", 1e-4)),
-        attention_channel_lambda=float(getattr(args, "attention_channel_lambda", 1e-4)),
+        attention_channel_lambda=0.0,
         attention_tv_lambda=float(getattr(args, "attention_tv_lambda", 1e-4)),
     )
 
 
-def _full_margin_head_forward(self, embeddings, labels):
+def _core_margin_head_forward(self, embeddings, labels):
     labels = labels.view(-1).long()
     norms = torch.norm(embeddings, dim=1, keepdim=True)
     norm_embeddings = F.normalize(embeddings, dim=1)
@@ -115,12 +112,11 @@ def _full_margin_head_forward(self, embeddings, labels):
     return loss, logits, norms
 
 
-# Patch both the imported symbol in the trainer module and the original module.
-base.parse_args = _full_parse_args
-base.get_model = _full_get_model
-base.MultiUIPerceptibilityCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss = _ConfiguredFullLoss
-soft_gated_losses.MultiUIPerceptibilityCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss = _ConfiguredFullLoss
-base.MarginSoftmaxHead.forward = _full_margin_head_forward
+base.parse_args = _core_parse_args
+base.get_model = _core_get_model
+base.MultiUIPerceptibilityCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss = _ConfiguredCoreLoss
+soft_gated_losses.MultiUIPerceptibilityCompetitionQualityAdaptiveSoftGatedAdaCurricularFaceLoss = _ConfiguredCoreLoss
+base.MarginSoftmaxHead.forward = _core_margin_head_forward
 
 
 if __name__ == "__main__":

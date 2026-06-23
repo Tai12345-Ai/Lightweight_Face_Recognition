@@ -66,6 +66,8 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
         label_gamma: float = 12.0,
         unrec_tau: float = 0.35,
         unrec_gamma: float = 8.0,
+        ri_lambda: float = 0.05,
+        attention_lambda: float = 1.0,
         anchor_lambda: float = 0.08,
         neg_lambda: float = 0.06,
         preserve_lambda: float = 0.03,
@@ -104,6 +106,8 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
         self.label_gamma = float(label_gamma)
         self.unrec_tau = float(unrec_tau)
         self.unrec_gamma = float(unrec_gamma)
+        self.ri_lambda = float(ri_lambda)
+        self.attention_lambda = float(attention_lambda)
         self.anchor_lambda = float(anchor_lambda)
         self.neg_lambda = float(neg_lambda)
         self.preserve_lambda = float(preserve_lambda)
@@ -154,7 +158,7 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
             nearest_idx = top_idx[:, 0]
         return v_prime.detach(), nearest_idx.detach()
 
-    def forward(self, logits, labels, embeddings=None, norms=None, class_weights=None):
+    def forward(self, logits, labels, embeddings=None, norms=None, class_weights=None, context=None):
         self._last_extra_loss = None
         self._last_sample_weight = None
         if norms is None:
@@ -196,11 +200,75 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
         t_val = self.t.to(dtype=rows.dtype)
         rows = torch.where(hard_mask, rows * (t_val + rows), rows).to(dtype=rows.dtype)
 
-        # Full identity-safe UI branch.
-        v = F.normalize(embeddings[index].float(), dim=1)
-        w = F.normalize(class_weights.float(), dim=1).to(device=v.device, dtype=v.dtype)
+        # Full identity-safe branch.  All post-attention terms use x'.
+        context = context or {}
+        x_prime_all = context.get("prime_x")
+        if x_prime_all is None:
+            x_prime_all = F.normalize(embeddings.float(), dim=1)
+        x_base_all = context.get("base_x")
+        if x_base_all is None:
+            x_base_all = x_prime_all.detach()
+
+        x_prime = x_prime_all[index].float()
+        x_base = x_base_all[index].float()
+        w = F.normalize(class_weights.float(), dim=1).to(device=x_prime.device, dtype=x_prime.dtype)
         w_y = w[target]
-        u_soft, top_vals, top_idx, top_weights = self._soft_topm_ui(v)
+
+        base_logits = x_base @ w.T
+        base_rows = base_logits
+        C = _safe_cosine(base_rows.gather(1, target.view(-1, 1)).view(-1), eps=self.eps)
+        base_one_hot = torch.zeros_like(base_rows, dtype=torch.bool)
+        base_one_hot.scatter_(1, target.view(-1, 1), True)
+        N = base_rows.masked_fill(base_one_hot, -1.0).max(dim=1).values
+        C_prime = target_cos
+        N_prime = c_minus
+
+        centers = self.multi_ui_centers_buf.to(device=x_prime.device, dtype=x_prime.dtype)
+        U = (x_base @ centers.T).max(dim=1).values
+        U_prime = (x_prime @ centers.T).max(dim=1).values
+
+        d_ui = (1.0 - U.detach()).clamp_min(0.0)
+        d_p = (1.0 - C.detach()).clamp_min(0.0)
+        d_n = (1.0 - N.detach()).clamp_min(0.0)
+        ri_target = (
+            torch.log(d_ui + self.eps)
+            + torch.log(d_n + self.eps)
+            - torch.log(d_p + self.eps)
+        )
+        ri_pred_all = context.get("ri_pred")
+        if ri_pred_all is None:
+            ri_loss = logits.new_zeros(())
+            low_ri_true = torch.sigmoid(-ri_target.detach())
+        else:
+            ri_pred = ri_pred_all[index].float()
+            ri_loss = F.smooth_l1_loss(ri_pred, ri_target.detach())
+            low_ri_true = torch.sigmoid(-ri_target.detach())
+
+        rho_att_all = context.get("rho_att")
+        if rho_att_all is None:
+            rho_att = torch.ones_like(C_prime.detach().float())
+        else:
+            rho_att = rho_att_all[index].float().detach().clamp(0.0, 1.0)
+        omega_all = context.get("omega_unrec")
+        if omega_all is None:
+            omega_unrec = torch.sigmoid(self.unrec_gamma * (self.unrec_tau - ri_target.detach()))
+        else:
+            omega_unrec = omega_all[index].float().detach().clamp(0.0, 1.0)
+        label_gate = torch.sigmoid(
+            self.label_gamma * (C.detach().float() - N.detach().float() - self.label_margin)
+        )
+        rho_ui = (
+            low_ri_true
+            * q_factor.float()
+            * label_gate
+            * (1.0 - omega_unrec)
+        ).clamp(0.0, 1.0).detach()
+        rho_neg = torch.maximum(
+            rho_ui,
+            (0.5 * rho_att * label_gate).clamp(0.0, 1.0),
+        ).detach()
+
+        u_soft, top_vals, top_idx, top_weights = self._soft_topm_ui(x_prime)
 
         # Project UI direction away from the positive class center.
         u_bar = u_soft - (u_soft * w_y).sum(dim=1, keepdim=True) * w_y
@@ -208,49 +276,40 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
         valid_orth = (u_norm.squeeze(1) > self.eps).float()
         u_perp = F.normalize(u_bar, dim=1)
 
-        cos_ui_orth = (v * u_perp).sum(dim=1).clamp(-1.0 + self.eps, 1.0 - self.eps)
-        cos_ui_soft = (v * u_soft).sum(dim=1).clamp(-1.0 + self.eps, 1.0 - self.eps)
-
-        d_ui = (1.0 - cos_ui_soft.detach()).clamp_min(0.0)
-        d_p = (1.0 - target_cos.detach().float()).clamp_min(0.0)
-        d_n = (1.0 - c_minus.detach().float()).clamp_min(0.0)
-        ri = (d_ui * d_n / (d_p + self.eps)).clamp_min(0.0)
-
-        hard_i = torch.sigmoid(self.ui_alpha * (c_minus.detach().float() - target_cos.detach().float()))
-        low_ri_gate = torch.sigmoid(self.ui_beta * (self.ui_tau_ri - ri))
-        label_gate = torch.sigmoid(self.label_gamma * (target_cos.detach().float() - c_minus.detach().float() - self.label_margin))
-        omega_unrec = torch.sigmoid(self.unrec_gamma * (self.unrec_tau - ri))
-        rho_ui = (q_factor.float() * hard_i * low_ri_gate * label_gate * (1.0 - 0.5 * omega_unrec)).clamp(0.0, 1.0).detach()
-
+        cos_ui_orth = (x_prime * u_perp).sum(dim=1).clamp(-1.0 + self.eps, 1.0 - self.eps)
+        cos_ui_soft = (x_prime * u_soft).sum(dim=1).clamp(-1.0 + self.eps, 1.0 - self.eps)
         ui_orth_raw = F.relu(cos_ui_orth - self.ui_margin).pow(2) * valid_orth
-        ui_orth_loss = (self.ui_lambda * rho_ui * ui_orth_raw).mean()
+        ui_orth_loss = (rho_ui * ui_orth_raw).mean()
+        anchor_loss = (
+            rho_att
+            * F.relu(C.detach().float() - C_prime.float() - self.delta_c).pow(2)
+        ).mean()
+        neg_loss = (
+            rho_neg
+            * F.relu(N_prime.float() - N.detach().float() - self.delta_n).pow(2)
+        ).mean()
+        preserve_loss = (
+            (1.0 - rho_att)
+            * (x_prime - x_base.detach()).pow(2).sum(dim=1)
+        ).mean()
+        attention_loss = context.get("attention_loss")
+        if attention_loss is None:
+            attention_loss = logits.new_zeros(())
 
-        # Proxy post-regularization embedding for identity-safety barriers.
-        step = F.relu(cos_ui_orth - self.ui_margin).unsqueeze(1) * u_perp
-        x_proxy = F.normalize(v - step, dim=1)
-        c_proxy = (x_proxy * w_y).sum(dim=1).clamp(-1.0 + self.eps, 1.0 - self.eps)
-        neg_logits_proxy = x_proxy @ w.T
-        neg_logits_proxy.scatter_(1, target.view(-1, 1), -1.0)
-        n_proxy = neg_logits_proxy.max(dim=1).values
-        u_proxy = (x_proxy * u_perp).sum(dim=1)
-
-        rho_anchor = rho_ui
-        rho_neg = torch.maximum(rho_ui, (0.5 * q_factor.float() * label_gate * hard_i).clamp(0.0, 1.0)).detach()
-        anchor_loss = (rho_anchor * F.relu(target_cos.detach().float() - c_proxy - self.delta_c).pow(2)).mean()
-        neg_loss = (rho_neg * F.relu(n_proxy - c_minus.detach().float() - self.delta_n).pow(2)).mean()
-        preserve_loss = ((1.0 - rho_ui) * (x_proxy - v.detach()).pow(2).sum(dim=1)).mean()
-
-        extra = ui_orth_loss + self.anchor_lambda * anchor_loss + self.neg_lambda * neg_loss + self.preserve_lambda * preserve_loss
+        extra = (
+            self.ri_lambda * ri_loss
+            + self.ui_lambda * ui_orth_loss
+            + self.anchor_lambda * anchor_loss
+            + self.neg_lambda * neg_loss
+            + self.preserve_lambda * preserve_loss
+            + self.attention_lambda * attention_loss.to(dtype=logits.dtype)
+        )
         self._last_extra_loss = extra
 
-        # Sample weighting for the recognition CE.
-        positive_wins = target_cos.detach().float() > c_minus.detach().float()
-        ui_like_mask = (ri < self.ui_tau_ri) | (d_ui < self.ui_d_margin)
-        hard_identifiable_mask = (ri >= self.ui_tau_ri) & (ri < self.ui_tau_easy) & positive_wins
-        dangerous_mask = ui_like_mask & (~positive_wins)
-        hard_boost = self.ui_hard_boost * hard_identifiable_mask.float()
-        danger_drop = self.ui_dangerous_downweight * dangerous_mask.float()
-        sample_weight_valid = (1.0 + hard_boost - danger_drop).clamp(self.ui_sample_weight_min, 1.0 + self.ui_hard_boost)
+        sample_weight_valid = (
+            self.ui_sample_weight_min
+            + (1.0 - self.ui_sample_weight_min) * (1.0 - omega_unrec)
+        ).clamp(self.ui_sample_weight_min, 1.0)
         sample_weight = torch.ones(labels.view(-1).shape[0], device=rows.device, dtype=rows.dtype)
         sample_weight[index] = sample_weight_valid.to(dtype=rows.dtype)
         self._last_sample_weight = sample_weight.detach()
@@ -259,9 +318,18 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
         logits[index] = rows
 
         with torch.no_grad():
-            delta_c = c_proxy - target_cos.detach().float()
-            delta_n = n_proxy - c_minus.detach().float()
-            delta_u = u_proxy - cos_ui_orth.detach().float()
+            delta_c = C_prime.detach().float() - C.detach().float()
+            delta_n = N_prime.detach().float() - N.detach().float()
+            delta_u = U_prime.detach().float() - U.detach().float()
+            embedding_shift = context.get("embedding_shift")
+            if embedding_shift is None:
+                embedding_shift = (x_prime - x_base.detach()).norm(dim=1)
+            else:
+                embedding_shift = embedding_shift[index]
+            hard_i = torch.sigmoid(self.ui_alpha * (N.detach().float() - C.detach().float()))
+            ui_like_mask = low_ri_true > 0.5
+            hard_identifiable_mask = (low_ri_true <= 0.5) & (C.detach().float() > N.detach().float())
+            dangerous_mask = ui_like_mask & (C.detach().float() <= N.detach().float())
             self.last_stats = {
                 "q_mean": float(q.detach().float().mean().item()),
                 "q_factor_mean": float(q_factor.detach().float().mean().item()),
@@ -270,15 +338,18 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
                 "hard_negative_ratio": float(hard_negative_ratio.item()),
                 "curricular_t": float(self.t.detach().item()),
                 "cos_ui_multi_mean": float(cos_ui_soft.detach().float().mean().item()),
+                "cos_ui_soft_mean": float(cos_ui_soft.detach().float().mean().item()),
                 "cos_ui_orth_mean": float(cos_ui_orth.detach().float().mean().item()),
                 "d_ui_multi_mean": float(d_ui.detach().float().mean().item()),
-                "ri_multi_mean": float(ri.detach().float().mean().item()),
-                "ri_multi_min": float(ri.detach().float().min().item()),
-                "ri_multi_max": float(ri.detach().float().max().item()),
+                "ri_multi_mean": float(ri_target.detach().float().mean().item()),
+                "ri_multi_min": float(ri_target.detach().float().min().item()),
+                "ri_multi_max": float(ri_target.detach().float().max().item()),
+                "ri_loss": float(ri_loss.detach().float().item()),
                 "hard_i_mean": float(hard_i.detach().float().mean().item()),
-                "ui_like_i_mean": float(low_ri_gate.detach().float().mean().item()),
+                "ui_like_i_mean": float(low_ri_true.detach().float().mean().item()),
                 "label_gate_mean": float(label_gate.detach().float().mean().item()),
                 "omega_unrec_mean": float(omega_unrec.detach().float().mean().item()),
+                "rho_att_mean": float(rho_att.detach().float().mean().item()),
                 "rho_ui_mean": float(rho_ui.detach().float().mean().item()),
                 "rho_neg_mean": float(rho_neg.detach().float().mean().item()),
                 "ui_loss_mean": float(ui_orth_raw.detach().float().mean().item()),
@@ -286,10 +357,12 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
                 "anchor_loss": float(anchor_loss.detach().float().item()),
                 "negative_guard_loss": float(neg_loss.detach().float().item()),
                 "preserve_loss": float(preserve_loss.detach().float().item()),
+                "attention_loss": float(attention_loss.detach().float().item()),
                 "ui_extra_loss": float(extra.detach().float().item()),
                 "delta_c_mean": float(delta_c.detach().float().mean().item()),
                 "delta_n_mean": float(delta_n.detach().float().mean().item()),
                 "delta_u_mean": float(delta_u.detach().float().mean().item()),
+                "embedding_shift_mean": float(embedding_shift.detach().float().mean().item()),
                 "sample_weight_mean": float(sample_weight.detach().float().mean().item()),
                 "sample_weight_min": float(sample_weight.detach().float().min().item()),
                 "sample_weight_max": float(sample_weight.detach().float().max().item()),
@@ -300,3 +373,17 @@ class Proposed43FullIdentitySafeLoss(nn.Module):
             }
 
         return logits * self.s
+
+
+class Proposed43CoreIdentitySafeLoss(Proposed43FullIdentitySafeLoss):
+    """Core 4.3++ objective: RI + attention + preserve + anchor.
+
+    Core intentionally leaves UI-orthogonal and negative-guard disabled.  The
+    forward implementation is shared with the Full loss so diagnostics remain
+    comparable, but the corresponding weights default to zero.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("ui_lambda", 0.0)
+        kwargs.setdefault("neg_lambda", 0.0)
+        super().__init__(*args, **kwargs)

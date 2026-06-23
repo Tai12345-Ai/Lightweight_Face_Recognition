@@ -1,7 +1,10 @@
 # %% [markdown]
 # # Proposed 4.3 Core 20-Epoch 5-Eval + Synthetic Degraded Eval Kaggle Runner
 #
-# Core-v0:
+# Core:
+# - true Core wrapper: F -> attention -> F' -> x';
+# - RI predictor, recoverability gate, weighted FR, preserve, anchor;
+# - UI-orthogonal, negative-guard and EMA UI prototypes stay disabled.
 # - dùng trainer Proposed 4.3 hiện có trong repo;
 # - multi-UI centers vẫn build/load vì trainer hiện tại cần;
 # - UI extra loss tắt bằng UI_LAMBDA = 0.0;
@@ -90,6 +93,24 @@ for k in list(sys.modules.keys()):
 # -----------------------------
 # 4. Import runner sau khi patch
 # -----------------------------
+import kaggle_5eval_degraded_common as common
+
+_original_build_proposed_command = common.build_proposed_command
+
+
+def _build_core_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes):
+    cmd = _original_build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes)
+    for i, item in enumerate(cmd):
+        if str(item) == "train_soft_gated_lambda_kaggle.py":
+            cmd[i] = "train_proposed_4_3_core_kaggle.py"
+            break
+    else:
+        raise RuntimeError("Could not replace train_soft_gated_lambda_kaggle.py with Core trainer wrapper.")
+    return cmd
+
+
+common.build_proposed_command = _build_core_proposed_command
+
 from kaggle_5eval_degraded_common import (
     run_5eval_degraded_runner,
     resolve_train_data_dir,
@@ -113,6 +134,7 @@ RUNNER_FILE = "kaggle_proposed_4_3_core_5eval_degraded_runner.py"
 RUNNER_KIND = "proposed4_3"
 OUTPUT_SUBDIR = "proposed_4_3_core"
 BACKUP_ZIP_NAME = "proposed_4_3_core_20ep_5eval_degraded_s5.zip"
+DEGRADED_EVAL_SCRIPT = "eval_degraded_proposed_4_3_full.py"
 
 LOSS_NAME = "proposed_4_3_multi_ui_attention"
 BACKBONE = "r18"
@@ -151,6 +173,12 @@ UI_SAMPLE_WEIGHT_MIN = 0.50
 ENABLE_ATTENTION = True
 ATTENTION_GAMMA = 0.03
 ATTENTION_REDUCTION = 16
+ATTENTION_ALPHA = 0.25
+CENTERED_ATTENTION = False
+RI_LAMBDA = 0.05
+ATTENTION_SPATIAL_LAMBDA = 1e-4
+ATTENTION_CHANNEL_LAMBDA = 0.0
+ATTENTION_TV_LAMBDA = 1e-4
 
 EVAL_TARGETS = [
     "lfw",

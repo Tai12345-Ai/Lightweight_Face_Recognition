@@ -131,13 +131,24 @@ class MobileFaceNet(Module):
                 if m.bias is not None:
                     m.bias.data.zero_()
 
-    def forward(self, x):
+    def forward_features(self, x):
         with torch.cuda.amp.autocast(self.fp16):
             for func in self.layers:
                 x = func(x)
         x = self.conv_sep(x.float() if self.fp16 else x)
+        return x
+
+    def forward_from_features(self, x):
         x = self.features(x)
         return x
+
+    def forward_with_features(self, x):
+        features = self.forward_features(x)
+        embedding = self.forward_from_features(features)
+        return embedding, features
+
+    def forward(self, x):
+        return self.forward_from_features(self.forward_features(x))
 
 
 def get_mbf(fp16, num_features, blocks=(1, 4, 6, 2), scale=2):

@@ -121,7 +121,27 @@ LOSS_STAT_KEYS = (
     "sample_weight_mean",
     "sample_weight_min",
     "sample_weight_max",
+    "base_fr_loss",
+    "ri_loss",
+    "ui_orth_loss",
+    "anchor_loss",
+    "negative_guard_loss",
+    "preserve_loss",
     "attention_loss",
+    "rho_att_mean",
+    "rho_ui_mean",
+    "rho_neg_mean",
+    "label_gate_mean",
+    "omega_unrec_mean",
+    "delta_c_mean",
+    "delta_n_mean",
+    "delta_u_mean",
+    "embedding_shift_mean",
+    "cos_ui_soft_mean",
+    "cos_ui_orth_mean",
+    "attention_spatial_mean",
+    "attention_channel_mean",
+    "attention_tv",
 )
 
 
@@ -306,6 +326,18 @@ def parse_args():
                         type=float, default=0.05, help="Weight for attention auxiliary loss.")
     parser.add_argument("--attention_reduction", "--attention-reduction", dest="attention_reduction",
                         type=int, default=16, help="Channel reduction ratio for attention module.")
+    parser.add_argument("--attention_alpha", "--attention-alpha", dest="attention_alpha",
+                        type=float, default=0.25, help="Feature amplification alpha for true 4.3++ attention.")
+    parser.add_argument("--centered_attention", "--centered-attention", dest="centered_attention",
+                        action="store_true", help="Use centered attention map M - mean(M).")
+    parser.add_argument("--ri_lambda", "--ri-lambda", dest="ri_lambda",
+                        type=float, default=0.05, help="RI predictor loss weight for 4.3++ wrappers.")
+    parser.add_argument("--attention_spatial_lambda", "--attention-spatial-lambda",
+                        dest="attention_spatial_lambda", type=float, default=1e-4)
+    parser.add_argument("--attention_channel_lambda", "--attention-channel-lambda",
+                        dest="attention_channel_lambda", type=float, default=1e-4)
+    parser.add_argument("--attention_tv_lambda", "--attention-tv-lambda",
+                        dest="attention_tv_lambda", type=float, default=1e-4)
     args = parser.parse_args()
     if args.loss == "proposed_4_quality_gate":
         args.loss = "competition_quality_adaptive_soft_gated_ada_curricular"

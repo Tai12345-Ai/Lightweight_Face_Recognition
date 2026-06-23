@@ -117,6 +117,7 @@ RUNNER_FILE = "kaggle_proposed_4_3_full_5eval_degraded_runner.py"
 RUNNER_KIND = "proposed4_3"
 OUTPUT_SUBDIR = "proposed_4_3_full"
 BACKUP_ZIP_NAME = "proposed_4_3_full_20ep_5eval_degraded_s135.zip"
+DEGRADED_EVAL_SCRIPT = "eval_degraded_proposed_4_3_full.py"
 LOSS_NAME = "proposed_4_3_multi_ui_attention"
 BACKBONE = "r18"
 
@@ -148,6 +149,12 @@ UI_SAMPLE_WEIGHT_MIN = 0.50
 ENABLE_ATTENTION = True
 ATTENTION_GAMMA = 0.03
 ATTENTION_REDUCTION = 16
+ATTENTION_ALPHA = 0.25
+CENTERED_ATTENTION = True
+RI_LAMBDA = 0.05
+ATTENTION_SPATIAL_LAMBDA = 1e-4
+ATTENTION_CHANNEL_LAMBDA = 1e-4
+ATTENTION_TV_LAMBDA = 1e-4
 
 EVAL_TARGETS = ["lfw", "cfp_fp", "cplfw", "agedb_30", "calfw"]
 VAL_TARGETS = EVAL_TARGETS

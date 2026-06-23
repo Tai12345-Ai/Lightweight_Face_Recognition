@@ -186,17 +186,28 @@ class VarGFaceNet(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
+    def forward_features(self, x):
         with torch.amp.autocast('cuda', enabled=self.fp16):
             x = self.head(x)
             for stage in self.stages:
                 x = stage(x)
         x = self.embed_conv(x.float() if self.fp16 else x)
+        return x
+
+    def forward_from_features(self, x):
         x = self.gdc(x)
         x = x.view(x.size(0), -1)
         x = self.linear(x)
         x = self.bn(x)
         return x
+
+    def forward_with_features(self, x):
+        features = self.forward_features(x)
+        embedding = self.forward_from_features(features)
+        return embedding, features
+
+    def forward(self, x):
+        return self.forward_from_features(self.forward_features(x))
 
 
 def get_vargfacenet(fp16=False, num_features=512):

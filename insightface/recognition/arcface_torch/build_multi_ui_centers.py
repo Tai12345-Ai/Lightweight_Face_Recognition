@@ -344,7 +344,11 @@ def load_backbone(backbone_name, pretrained_path, device, use_fp16=False):
             cleaned[new_k] = v
         state_dict = cleaned
 
-    backbone.load_state_dict(state_dict, strict=True)
+    result = backbone.load_state_dict(state_dict, strict=False)
+    if result.missing_keys:
+        logger.warning("Missing backbone keys while loading %s: %s", pretrained_path, result.missing_keys[:10])
+    if result.unexpected_keys:
+        logger.warning("Unexpected checkpoint keys while loading %s: %s", pretrained_path, result.unexpected_keys[:10])
     backbone.eval()
 
     logger.info("Loaded backbone from %s", pretrained_path)
