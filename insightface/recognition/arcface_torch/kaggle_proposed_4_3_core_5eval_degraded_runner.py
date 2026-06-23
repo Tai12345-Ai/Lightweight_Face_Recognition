@@ -238,7 +238,8 @@ DEGRADED_BATCH_SIZE = 128
 
 # Offline multi-UI centers for existing Proposed 4.3 trainer.
 UI_CENTER_NUM_SAMPLES = 50000
-UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_core_multi_ui_centers_s135.pth")
+UI_CENTER_SEVERITIES = "5"
+UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_core_multi_ui_centers_s5.pth")
 
 
 # -----------------------------
@@ -262,11 +263,15 @@ def find_existing_ui_centers():
     if candidates:
         candidates = sorted(
             candidates,
-            key=lambda x: (0 if "s135" in str(x).lower() else 1, len(str(x))),
+            key=lambda x: (0 if "s5" in str(x).lower() else 1, len(str(x))),
         )
         chosen = candidates[0]
-        if "s135" not in str(chosen).lower():
-            print("[WARN] Existing UI centers are not marked s135:", chosen)
+        if "s5" not in str(chosen).lower():
+            print(
+                "[WARN] Existing UI centers are not marked s5. "
+                "UI centers should preferably be built from severity 5 only.",
+                chosen,
+            )
         print("Found existing multi-UI centers:", chosen)
         return chosen
 
@@ -303,7 +308,7 @@ def ensure_multi_ui_centers():
         "--batch-size", str(DEGRADED_BATCH_SIZE),
         "--num-workers", str(NUM_WORKERS),
         "--degradations", ",".join(DEGRADED_DEGRADATIONS),
-        "--severities", DEGRADED_SEVERITIES,
+        "--severities", UI_CENTER_SEVERITIES,
         "--attention-alpha", str(ATTENTION_ALPHA),
         "--include-global",
         "--overwrite",

@@ -25,6 +25,13 @@ Both runners auto-detect:
 - `backbone.pth` when no finished Core checkpoint is available
 - existing multi-UI centers, or build them automatically
 
+Protocol split:
+
+```text
+UI centers: severity 5
+Evaluation: severity 1,3,5
+```
+
 ## Core
 
 Core uses the true attention path:
@@ -57,6 +64,12 @@ Core uses degraded severities `1,3,5` and writes:
 
 ```text
 proposed_4_3_core_20ep_5eval_degraded_s135.zip
+```
+
+Core UI centers are built from severity `5` only and use:
+
+```text
+proposed_4_3_core_multi_ui_centers_s5.pth
 ```
 
 ## Full
@@ -135,6 +148,12 @@ Full uses degraded severities `1,3,5` and writes:
 
 ```text
 proposed_4_3_full_20ep_5eval_degraded_s135.zip
+```
+
+Full UI centers are built from severity `5` only and use:
+
+```text
+proposed_4_3_full_multi_ui_centers_s5.pth
 ```
 
 ## Logging

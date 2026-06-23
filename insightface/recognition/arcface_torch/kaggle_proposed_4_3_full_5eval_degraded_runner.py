@@ -200,8 +200,8 @@ DEGRADED_DEGRADATIONS = [
 DEGRADED_SEVERITIES = "1,3,5"
 DEGRADED_BATCH_SIZE = 128
 UI_CENTER_NUM_SAMPLES = 50000
-UI_CENTER_SEVERITIES = "1,3,5"
-UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_full_multi_ui_centers_s135.pth")
+UI_CENTER_SEVERITIES = "5"
+UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_full_multi_ui_centers_s5.pth")
 
 
 def find_existing_ui_centers():
@@ -218,13 +218,17 @@ def find_existing_ui_centers():
         chosen = sorted(
             candidates,
             key=lambda p: (
-                0 if "s135" in str(p).lower() else 1,
+                0 if "s5" in str(p).lower() else 1,
                 0 if "full" in str(p).lower() else 1,
                 len(str(p)),
             ),
         )[0]
-        if "s135" not in str(chosen).lower():
-            print("[WARN] Existing UI centers are not marked s135:", chosen)
+        if "s5" not in str(chosen).lower():
+            print(
+                "[WARN] Existing UI centers are not marked s5. "
+                "UI centers should preferably be built from severity 5 only.",
+                chosen,
+            )
         print("Found existing multi-UI centers:", chosen)
         return chosen
     return None
