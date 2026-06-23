@@ -69,11 +69,18 @@ def extract_core_checkpoint_from_zip():
             continue
         try:
             with zipfile.ZipFile(z, "r") as archive:
-                members = [m for m in archive.namelist() if m.endswith("best.pth")]
+                members = [
+                    m for m in archive.namelist()
+                    if m.endswith("best.pth") or m.endswith("latest.pt")
+                ]
                 if not members:
                     continue
-                member = sorted(members, key=len)[0]
-                out = Path("/kaggle/working/core_warm_start_best.pth")
+                member = sorted(
+                    members,
+                    key=lambda item: (0 if item.endswith("best.pth") else 1, len(item)),
+                )[0]
+                suffix = "best.pth" if member.endswith("best.pth") else "latest.pt"
+                out = Path(f"/kaggle/working/core_warm_start_{suffix}")
                 with archive.open(member) as src, open(out, "wb") as dst:
                     shutil.copyfileobj(src, dst)
                 print("Extracted Core warm-start:", out)
@@ -100,6 +107,10 @@ def find_pretrained_backbone():
     if not hits:
         raise FileNotFoundError("Could not find backbone.pth under /kaggle/input.")
     chosen = hits[0]
+    print(
+        "[WARN] Full is starting from backbone.pth, not from a finished Core checkpoint. "
+        "This run is for debugging; final comparison should use Core warm-start."
+    )
     print("Detected PRETRAINED_BACKBONE:", chosen)
     return chosen
 
@@ -117,6 +128,8 @@ RUNNER_FILE = "kaggle_proposed_4_3_full_5eval_degraded_runner.py"
 RUNNER_KIND = "proposed4_3"
 OUTPUT_SUBDIR = "proposed_4_3_full"
 BACKUP_ZIP_NAME = "proposed_4_3_full_20ep_5eval_degraded_s135.zip"
+# Clean eval runs through train_proposed_4_3_full_kaggle.py's wrapper; degraded
+# eval uses this script so inference emits x' instead of the bare backbone x.
 DEGRADED_EVAL_SCRIPT = "eval_degraded_proposed_4_3_full.py"
 LOSS_NAME = "proposed_4_3_multi_ui_attention"
 BACKBONE = "r18"
@@ -136,7 +149,26 @@ MAX_TRAIN_MINUTES = 660
 S = 64.0
 M = 0.4
 H = 0.333
-UI_LAMBDA = 0.05
+
+FULL_TOP_M = 4
+FULL_UI_SOFT_TAU = 12.0
+FULL_UI_MARGIN = 0.20
+
+FULL_UI_LAMBDA = 0.05
+FULL_RI_LAMBDA = 0.05
+FULL_ANCHOR_LAMBDA = 0.08
+FULL_NEG_LAMBDA = 0.06
+FULL_PRESERVE_LAMBDA = 0.03
+
+FULL_DELTA_C = 0.02
+FULL_DELTA_N = 0.02
+
+FULL_LABEL_GAMMA = 12.0
+FULL_LABEL_MARGIN = 0.05
+FULL_UNREC_TAU = 0.35
+FULL_UNREC_GAMMA = 8.0
+
+UI_LAMBDA = FULL_UI_LAMBDA
 UI_RHO = 0.20
 UI_TAU_RI = 1.0
 UI_TAU_EASY = 2.0
@@ -151,7 +183,7 @@ ATTENTION_GAMMA = 0.03
 ATTENTION_REDUCTION = 16
 ATTENTION_ALPHA = 0.25
 CENTERED_ATTENTION = True
-RI_LAMBDA = 0.05
+RI_LAMBDA = FULL_RI_LAMBDA
 ATTENTION_SPATIAL_LAMBDA = 1e-4
 ATTENTION_CHANNEL_LAMBDA = 1e-4
 ATTENTION_TV_LAMBDA = 1e-4
@@ -168,8 +200,8 @@ DEGRADED_DEGRADATIONS = [
 DEGRADED_SEVERITIES = "1,3,5"
 DEGRADED_BATCH_SIZE = 128
 UI_CENTER_NUM_SAMPLES = 50000
-UI_CENTER_SEVERITIES = "5"
-UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_full_multi_ui_centers_s5.pth")
+UI_CENTER_SEVERITIES = "1,3,5"
+UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_full_multi_ui_centers_s135.pth")
 
 
 def find_existing_ui_centers():
@@ -183,7 +215,16 @@ def find_existing_ui_centers():
             if "multi" in full and ("ui" in name or "center" in name or "centers" in name):
                 candidates.append(p)
     if candidates:
-        chosen = sorted(candidates, key=lambda p: (0 if "full" in str(p).lower() else 1, len(str(p))))[0]
+        chosen = sorted(
+            candidates,
+            key=lambda p: (
+                0 if "s135" in str(p).lower() else 1,
+                0 if "full" in str(p).lower() else 1,
+                len(str(p)),
+            ),
+        )[0]
+        if "s135" not in str(chosen).lower():
+            print("[WARN] Existing UI centers are not marked s135:", chosen)
         print("Found existing multi-UI centers:", chosen)
         return chosen
     return None
@@ -208,9 +249,12 @@ def ensure_multi_ui_centers():
         "--num-workers", str(NUM_WORKERS),
         "--degradations", ",".join(DEGRADED_DEGRADATIONS),
         "--severities", UI_CENTER_SEVERITIES,
+        "--attention-alpha", str(ATTENTION_ALPHA),
         "--include-global",
         "--overwrite",
     ]
+    if CENTERED_ATTENTION:
+        cmd.append("--centered-attention")
     if USE_FP16:
         cmd.append("--fp16")
     run(cmd, cwd=ARCFACE_DIR)

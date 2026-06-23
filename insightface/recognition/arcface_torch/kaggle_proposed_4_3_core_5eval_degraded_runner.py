@@ -123,17 +123,49 @@ from kaggle_5eval_degraded_common import (
 # -----------------------------
 # 5. Data paths
 # -----------------------------
-TRAIN_DATA_DIR = Path("/kaggle/input/datasets/debarghamitraroy/casia-webface/casia-webface")
-EVAL_DIR = Path("/kaggle/input/datasets/debarghamitraroy/casia-webface/eval")
-PRETRAINED_BACKBONE = Path("/kaggle/input/datasets/hhdhbdbddhhd/backbone/backbone.pth")
+def find_train_data_dir():
+    for rec in sorted(INPUT_ROOT.rglob("train.rec")):
+        if (rec.parent / "train.idx").exists():
+            print("Detected TRAIN_DATA_DIR:", rec.parent)
+            return rec.parent
+    raise FileNotFoundError("Could not find train.rec + train.idx under /kaggle/input.")
+
+
+def find_eval_dir():
+    required = ["lfw.bin", "cfp_fp.bin", "cplfw.bin", "agedb_30.bin", "calfw.bin"]
+    for lfw in sorted(INPUT_ROOT.rglob("lfw.bin")):
+        if all((lfw.parent / name).exists() for name in required):
+            print("Detected EVAL_DIR:", lfw.parent)
+            return lfw.parent
+    raise FileNotFoundError("Could not find 5-eval .bin directory under /kaggle/input.")
+
+
+def find_pretrained_backbone():
+    hits = sorted(INPUT_ROOT.rglob("backbone.pth"))
+    if not hits:
+        raise FileNotFoundError("Could not find backbone.pth under /kaggle/input.")
+    chosen = hits[0]
+    print("Detected PRETRAINED_BACKBONE:", chosen)
+    return chosen
+
+
+TRAIN_DATA_DIR = find_train_data_dir()
+EVAL_DIR = find_eval_dir()
+PRETRAINED_BACKBONE = find_pretrained_backbone()
+
+assert (TRAIN_DATA_DIR / "train.rec").exists()
+assert (TRAIN_DATA_DIR / "train.idx").exists()
+assert (EVAL_DIR / "lfw.bin").exists()
+assert PRETRAINED_BACKBONE.exists()
 
 # -----------------------------
-# 6. Core-v0 configuration
+# 6. Core configuration
 # -----------------------------
 RUNNER_FILE = "kaggle_proposed_4_3_core_5eval_degraded_runner.py"
 RUNNER_KIND = "proposed4_3"
 OUTPUT_SUBDIR = "proposed_4_3_core"
-BACKUP_ZIP_NAME = "proposed_4_3_core_20ep_5eval_degraded_s5.zip"
+BACKUP_ZIP_NAME = "proposed_4_3_core_20ep_5eval_degraded_s135.zip"
+# Core degraded eval must also load the attention wrapper so inference uses x'.
 DEGRADED_EVAL_SCRIPT = "eval_degraded_proposed_4_3_full.py"
 
 LOSS_NAME = "proposed_4_3_multi_ui_attention"
@@ -169,7 +201,7 @@ UI_HARD_BOOST = 0.10
 UI_DANGEROUS_DOWNWEIGHT = 0.35
 UI_SAMPLE_WEIGHT_MIN = 0.50
 
-# Attention auxiliary setting.
+# True attention setting for Core wrapper.
 ENABLE_ATTENTION = True
 ATTENTION_GAMMA = 0.03
 ATTENTION_REDUCTION = 16
@@ -201,12 +233,12 @@ DEGRADED_DEGRADATIONS = [
     "low_illumination",
     "alignment_perturb",
 ]
-DEGRADED_SEVERITIES = "5"
+DEGRADED_SEVERITIES = "1,3,5"
 DEGRADED_BATCH_SIZE = 128
 
 # Offline multi-UI centers for existing Proposed 4.3 trainer.
 UI_CENTER_NUM_SAMPLES = 50000
-UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_core_multi_ui_centers_s5.pth")
+UI_CENTER_OUTPUT = Path("/kaggle/working/ui_centers/proposed_4_3_core_multi_ui_centers_s135.pth")
 
 
 # -----------------------------
@@ -228,9 +260,15 @@ def find_existing_ui_centers():
                 candidates.append(p)
 
     if candidates:
-        candidates = sorted(candidates, key=lambda x: len(str(x)))
-        print("Found existing multi-UI centers:", candidates[0])
-        return candidates[0]
+        candidates = sorted(
+            candidates,
+            key=lambda x: (0 if "s135" in str(x).lower() else 1, len(str(x))),
+        )
+        chosen = candidates[0]
+        if "s135" not in str(chosen).lower():
+            print("[WARN] Existing UI centers are not marked s135:", chosen)
+        print("Found existing multi-UI centers:", chosen)
+        return chosen
 
     return None
 
@@ -266,9 +304,12 @@ def ensure_multi_ui_centers():
         "--num-workers", str(NUM_WORKERS),
         "--degradations", ",".join(DEGRADED_DEGRADATIONS),
         "--severities", DEGRADED_SEVERITIES,
+        "--attention-alpha", str(ATTENTION_ALPHA),
         "--include-global",
         "--overwrite",
     ]
+    if CENTERED_ATTENTION:
+        cmd.append("--centered-attention")
 
     if USE_FP16:
         cmd.append("--fp16")

@@ -8,6 +8,9 @@ checkpointing.  This wrapper replaces only the Proposed 4.3 runtime pieces:
 2) the Proposed 4.3 loss is replaced by the Full identity-safe objective;
 3) MarginSoftmaxHead.forward passes the wrapper context and normalized class
    weights to the loss.
+
+Clean eval inside the base trainer also receives this wrapper, so both clean
+and degraded Full evaluation emit x' rather than the bare backbone embedding x.
 """
 
 from __future__ import annotations
@@ -33,7 +36,19 @@ _FULL_ARGS = None
 class _ConfiguredFullLoss(Proposed43FullIdentitySafeLoss):
     def __init__(self, *args, **kwargs):
         if _FULL_ARGS is not None:
+            kwargs.setdefault("top_m", int(getattr(_FULL_ARGS, "full_top_m", 4)))
+            kwargs.setdefault("ui_soft_tau", float(getattr(_FULL_ARGS, "full_ui_soft_tau", 12.0)))
+            kwargs.setdefault("ui_margin", float(getattr(_FULL_ARGS, "full_ui_margin", 0.20)))
             kwargs.setdefault("ri_lambda", float(getattr(_FULL_ARGS, "ri_lambda", 0.05)))
+            kwargs.setdefault("anchor_lambda", float(getattr(_FULL_ARGS, "full_anchor_lambda", 0.08)))
+            kwargs.setdefault("neg_lambda", float(getattr(_FULL_ARGS, "full_neg_lambda", 0.06)))
+            kwargs.setdefault("preserve_lambda", float(getattr(_FULL_ARGS, "full_preserve_lambda", 0.03)))
+            kwargs.setdefault("delta_c", float(getattr(_FULL_ARGS, "full_delta_c", 0.02)))
+            kwargs.setdefault("delta_n", float(getattr(_FULL_ARGS, "full_delta_n", 0.02)))
+            kwargs.setdefault("label_gamma", float(getattr(_FULL_ARGS, "full_label_gamma", 12.0)))
+            kwargs.setdefault("label_margin", float(getattr(_FULL_ARGS, "full_label_margin", 0.05)))
+            kwargs.setdefault("unrec_tau", float(getattr(_FULL_ARGS, "full_unrec_tau", 0.35)))
+            kwargs.setdefault("unrec_gamma", float(getattr(_FULL_ARGS, "full_unrec_gamma", 8.0)))
         super().__init__(*args, **kwargs)
 
 

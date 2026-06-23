@@ -48,6 +48,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from backbones import get_model
 from degradation.transforms import DegradationTransform, SUPPORTED_DEGRADATIONS
+from proposed_4_3_attention_model import Proposed43AttentionBackbone, infer_feature_channels
 from recordio_fallback import MXIndexedRecordIOFallback, unpack_image_record
 
 
@@ -303,6 +304,18 @@ def parse_args():
     parser.add_argument("--image-size", type=int, default=112)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument(
+        "--attention-alpha",
+        type=float,
+        default=None,
+        help="Override checkpoint attention_alpha when building centers from a Core/Full wrapper.",
+    )
+    parser.add_argument(
+        "--centered-attention",
+        action="store_true",
+        default=None,
+        help="Override checkpoint centered_attention=True when building centers from a Core/Full wrapper.",
+    )
+    parser.add_argument(
         "--degradations",
         default="gaussian_blur,motion_blur,low_resolution,jpeg_compression,low_illumination,alignment_perturb",
         help="Comma-separated degradation types",
@@ -313,14 +326,21 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_backbone(backbone_name, pretrained_path, device, use_fp16=False):
+def load_backbone(
+    backbone_name,
+    pretrained_path,
+    device,
+    use_fp16=False,
+    attention_alpha=None,
+    centered_attention=None,
+):
     """Load pretrained backbone with several common checkpoint formats."""
-    backbone = get_model(
+    raw_backbone = get_model(
         backbone_name,
         dropout=0.0,
         fp16=use_fp16,
         num_features=512,
-    ).to(device)
+    )
 
     ckpt = torch.load(pretrained_path, map_location="cpu")
 
@@ -332,6 +352,55 @@ def load_backbone(backbone_name, pretrained_path, device, use_fp16=False):
         state_dict = ckpt["state_dict"]
     else:
         state_dict = ckpt
+
+    if isinstance(state_dict, dict):
+        unwrapped_state = {}
+        for k, v in state_dict.items():
+            new_k = str(k)
+            while new_k.startswith("module."):
+                new_k = new_k[len("module."):]
+            unwrapped_state[new_k] = v
+        state_dict = unwrapped_state
+
+    has_attention_state = isinstance(state_dict, dict) and any(
+        str(k).startswith(("attention.", "ri_predictor.", "quality_mean", "quality_std"))
+        for k in state_dict.keys()
+    )
+
+    if has_attention_state:
+        config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+        feature_channels = infer_feature_channels(raw_backbone, image_size=112)
+        effective_attention_alpha = (
+            float(config.get("attention_alpha", 0.25))
+            if attention_alpha is None
+            else float(attention_alpha)
+        )
+        effective_centered_attention = (
+            bool(config.get("centered_attention", False))
+            if centered_attention is None
+            else bool(centered_attention)
+        )
+        backbone = Proposed43AttentionBackbone(
+            raw_backbone,
+            feature_channels=feature_channels,
+            embedding_dim=512,
+            attention_reduction=int(config.get("attention_reduction", 16)),
+            attention_alpha=effective_attention_alpha,
+            centered_attention=effective_centered_attention,
+            attention_spatial_lambda=float(config.get("attention_spatial_lambda", 1e-4)),
+            attention_channel_lambda=float(config.get("attention_channel_lambda", 1e-4)),
+            attention_tv_lambda=float(config.get("attention_tv_lambda", 1e-4)),
+        ).to(device)
+        result = backbone.load_state_dict(state_dict, strict=False)
+        if result.missing_keys:
+            logger.warning("Missing Full/Core wrapper keys while loading %s: %s", pretrained_path, result.missing_keys[:10])
+        if result.unexpected_keys:
+            logger.warning("Unexpected Full/Core wrapper keys while loading %s: %s", pretrained_path, result.unexpected_keys[:10])
+        backbone.eval()
+        logger.info("Loaded attention wrapper from %s; UI centers will use x' embeddings.", pretrained_path)
+        return backbone
+
+    backbone = raw_backbone.to(device)
 
     # Remove possible DataParallel / Lightning prefixes.
     if isinstance(state_dict, dict):
@@ -410,6 +479,8 @@ def main():
         args.pretrained_backbone,
         device,
         use_fp16=args.fp16,
+        attention_alpha=args.attention_alpha,
+        centered_attention=args.centered_attention,
     )
 
     centers_list = []

@@ -444,6 +444,23 @@ def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, nu
             cmd.extend(["--attention-channel-lambda", str(config["ATTENTION_CHANNEL_LAMBDA"])])
         if "ATTENTION_TV_LAMBDA" in config:
             cmd.extend(["--attention-tv-lambda", str(config["ATTENTION_TV_LAMBDA"])])
+        full_options = {
+            "FULL_TOP_M": "--full-top-m",
+            "FULL_UI_SOFT_TAU": "--full-ui-soft-tau",
+            "FULL_UI_MARGIN": "--full-ui-margin",
+            "FULL_ANCHOR_LAMBDA": "--full-anchor-lambda",
+            "FULL_NEG_LAMBDA": "--full-neg-lambda",
+            "FULL_PRESERVE_LAMBDA": "--full-preserve-lambda",
+            "FULL_DELTA_C": "--full-delta-c",
+            "FULL_DELTA_N": "--full-delta-n",
+            "FULL_LABEL_GAMMA": "--full-label-gamma",
+            "FULL_LABEL_MARGIN": "--full-label-margin",
+            "FULL_UNREC_TAU": "--full-unrec-tau",
+            "FULL_UNREC_GAMMA": "--full-unrec-gamma",
+        }
+        for config_key, option_name in full_options.items():
+            if config_key in config:
+                cmd.extend([option_name, str(config[config_key])])
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
     latest = Path(current_exp_dir) / "latest.pt"
     if latest.exists():

@@ -188,7 +188,15 @@ def parse_args():
         type=float,
         default=2.0,
     )
-    parser.add_argument("--ui_lambda", "--ui-lambda", dest="ui_lambda", type=float, default=0.05)
+    parser.add_argument(
+        "--ui_lambda",
+        "--ui-lambda",
+        "--full_ui_lambda",
+        "--full-ui-lambda",
+        dest="ui_lambda",
+        type=float,
+        default=0.05,
+    )
     parser.add_argument("--ui_rho", "--ui-rho", dest="ui_rho", type=float, default=0.2)
     parser.add_argument("--ui_tau_ri", "--ui-tau-ri", dest="ui_tau_ri", type=float, default=1.0)
     parser.add_argument("--ui_tau_easy", "--ui-tau-easy", dest="ui_tau_easy", type=float, default=2.0)
@@ -330,7 +338,7 @@ def parse_args():
                         type=float, default=0.25, help="Feature amplification alpha for true 4.3++ attention.")
     parser.add_argument("--centered_attention", "--centered-attention", dest="centered_attention",
                         action="store_true", help="Use centered attention map M - mean(M).")
-    parser.add_argument("--ri_lambda", "--ri-lambda", dest="ri_lambda",
+    parser.add_argument("--ri_lambda", "--ri-lambda", "--full_ri_lambda", "--full-ri-lambda", dest="ri_lambda",
                         type=float, default=0.05, help="RI predictor loss weight for 4.3++ wrappers.")
     parser.add_argument("--attention_spatial_lambda", "--attention-spatial-lambda",
                         dest="attention_spatial_lambda", type=float, default=1e-4)
@@ -338,6 +346,18 @@ def parse_args():
                         dest="attention_channel_lambda", type=float, default=1e-4)
     parser.add_argument("--attention_tv_lambda", "--attention-tv-lambda",
                         dest="attention_tv_lambda", type=float, default=1e-4)
+    parser.add_argument("--full_top_m", "--full-top-m", dest="full_top_m", type=int, default=4)
+    parser.add_argument("--full_ui_soft_tau", "--full-ui-soft-tau", dest="full_ui_soft_tau", type=float, default=12.0)
+    parser.add_argument("--full_ui_margin", "--full-ui-margin", dest="full_ui_margin", type=float, default=0.20)
+    parser.add_argument("--full_anchor_lambda", "--full-anchor-lambda", dest="full_anchor_lambda", type=float, default=0.08)
+    parser.add_argument("--full_neg_lambda", "--full-neg-lambda", dest="full_neg_lambda", type=float, default=0.06)
+    parser.add_argument("--full_preserve_lambda", "--full-preserve-lambda", dest="full_preserve_lambda", type=float, default=0.03)
+    parser.add_argument("--full_delta_c", "--full-delta-c", dest="full_delta_c", type=float, default=0.02)
+    parser.add_argument("--full_delta_n", "--full-delta-n", dest="full_delta_n", type=float, default=0.02)
+    parser.add_argument("--full_label_gamma", "--full-label-gamma", dest="full_label_gamma", type=float, default=12.0)
+    parser.add_argument("--full_label_margin", "--full-label-margin", dest="full_label_margin", type=float, default=0.05)
+    parser.add_argument("--full_unrec_tau", "--full-unrec-tau", dest="full_unrec_tau", type=float, default=0.35)
+    parser.add_argument("--full_unrec_gamma", "--full-unrec-gamma", dest="full_unrec_gamma", type=float, default=8.0)
     args = parser.parse_args()
     if args.loss == "proposed_4_quality_gate":
         args.loss = "competition_quality_adaptive_soft_gated_ada_curricular"
@@ -451,7 +471,30 @@ def json_safe_config(args, exp_dir: Path) -> Dict:
         ):
             config.pop(key, None)
     if args.loss != "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
-        for key in ("multi_ui_centers", "enable_attention", "attention_gamma", "attention_reduction"):
+        for key in (
+            "multi_ui_centers",
+            "enable_attention",
+            "attention_gamma",
+            "attention_reduction",
+            "attention_alpha",
+            "centered_attention",
+            "ri_lambda",
+            "attention_spatial_lambda",
+            "attention_channel_lambda",
+            "attention_tv_lambda",
+            "full_top_m",
+            "full_ui_soft_tau",
+            "full_ui_margin",
+            "full_anchor_lambda",
+            "full_neg_lambda",
+            "full_preserve_lambda",
+            "full_delta_c",
+            "full_delta_n",
+            "full_label_gamma",
+            "full_label_margin",
+            "full_unrec_tau",
+            "full_unrec_gamma",
+        ):
             config.pop(key, None)
     config["experiment_dir"] = str(exp_dir)
     config["loss_name"] = args.loss
@@ -519,8 +562,7 @@ def select_eval_score(eval_metrics: Dict, group_metrics: Dict[str, float]):
 
 def add_loss_stats(row: Dict, loss_stats: Dict) -> Dict:
     for key in LOSS_STAT_KEYS:
-        if key in loss_stats:
-            row[key] = loss_stats[key]
+        row[key] = loss_stats.get(key, "")
     return row
 
 
@@ -615,6 +657,28 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
                 "eps",
             ]
         )
+        if args.loss == "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
+            float_keys.extend(
+                [
+                    "attention_alpha",
+                    "ri_lambda",
+                    "attention_spatial_lambda",
+                    "attention_channel_lambda",
+                    "attention_tv_lambda",
+                    "full_top_m",
+                    "full_ui_soft_tau",
+                    "full_ui_margin",
+                    "full_anchor_lambda",
+                    "full_neg_lambda",
+                    "full_preserve_lambda",
+                    "full_delta_c",
+                    "full_delta_n",
+                    "full_label_gamma",
+                    "full_label_margin",
+                    "full_unrec_tau",
+                    "full_unrec_gamma",
+                ]
+            )
     else:
         float_keys.append("lambda_gate")
 
@@ -623,6 +687,14 @@ def validate_resume_config(args, checkpoint_config, iteration_in_epoch):
         current_value = getattr(args, key, None)
         if saved_value is not None and not _same_float(saved_value, current_value):
             mismatches.append(f"{key}: checkpoint={saved_value!r} current={current_value!r}")
+
+    if args.loss == "multi_ui_perceptibility_competition_quality_adaptive_soft_gated_ada_curricular":
+        saved_value = checkpoint_config.get("centered_attention")
+        current_value = getattr(args, "centered_attention", None)
+        if saved_value is not None and bool(saved_value) != bool(current_value):
+            mismatches.append(
+                f"centered_attention: checkpoint={saved_value!r} current={current_value!r}"
+            )
 
     if mismatches:
         raise ValueError(

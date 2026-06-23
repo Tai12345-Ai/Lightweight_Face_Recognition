@@ -4,6 +4,9 @@
 This mirrors eval_degraded_6phase2.py but loads the Full wrapper
 (backbone + attention + RI predictor) and therefore emits post-attention
 embeddings x' at inference time.
+
+Full clean/degraded evaluation uses post-attention embedding x', not bare
+backbone x.
 """
 
 from pathlib import Path
