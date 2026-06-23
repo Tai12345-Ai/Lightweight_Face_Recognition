@@ -19,7 +19,7 @@ else:
 os.chdir(ARCFACE_DIR)
 sys.path.insert(0, str(ARCFACE_DIR))
 
-from kaggle_5eval_degraded_common import run_5eval_degraded_runner
+from kaggle_5eval_degraded_common import run_5eval_degradeAd_runner
 
 RUNNER_FILE = "kaggle_adaface_5eval_degraded_runner.py"
 RUNNER_KIND = "phase2"
