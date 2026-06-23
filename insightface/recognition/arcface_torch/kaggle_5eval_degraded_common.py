@@ -19,6 +19,7 @@ DEFAULT_TRAIN_DATA_DIR = INPUT_ROOT / "CASIA-WebFace" / "casia-webface"
 DEFAULT_EVAL_DIR = INPUT_ROOT / "CASIA-WebFace" / "eval"
 DEFAULT_PRETRAINED_BACKBONE = INPUT_ROOT / "backbone" / "backbone.pth"
 EXPERIMENTS_ROOT = Path("/kaggle/working/experiments")
+DEFAULT_DEGRADED_SEVERITIES = "1,3,5"
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -111,9 +112,7 @@ def resolve_train_data_dir(preferred):
         INPUT_ROOT / "casia-webface" / "casia-webface",
         INPUT_ROOT / "casia-webface",
     ]
-    candidates.extend(
-        directory for directory in input_dirs(max_depth=2) if looks_like_casia_path(directory)
-    )
+    candidates.extend(directory for directory in input_dirs(max_depth=2) if looks_like_casia_path(directory))
     for candidate in unique_existing(candidates):
         normalized = normalize_train_data_dir(candidate)
         if has_train_data(normalized):
@@ -122,7 +121,8 @@ def resolve_train_data_dir(preferred):
 
 
 def eval_dir_has_targets(path, targets):
-    return Path(path).is_dir() and all((Path(path) / f"{target}.bin").exists() for target in targets)
+    path = Path(path)
+    return path.is_dir() and all((path / f"{target}.bin").exists() for target in targets)
 
 
 def resolve_eval_dir(train_dir, targets):
@@ -164,11 +164,7 @@ def resolve_pretrained_backbone(preferred):
                 RuntimeWarning,
             )
         return candidates[0]
-    pth_candidates = sorted(
-        candidate
-        for directory in input_dirs(max_depth=2)
-        for candidate in directory.glob("*.pth")
-    )
+    pth_candidates = sorted(candidate for directory in input_dirs(max_depth=2) for candidate in directory.glob("*.pth"))
     if len(pth_candidates) == 1:
         return pth_candidates[0]
     if not pth_candidates:
@@ -189,8 +185,7 @@ def detect_num_classes(train_dir, default=10575):
             return value
         except Exception as exc:
             warnings.warn(
-                f"Could not parse {property_path}: {content!r} ({exc}). "
-                f"Using default NUM_CLASSES={default}.",
+                f"Could not parse {property_path}: {content!r} ({exc}). Using default NUM_CLASSES={default}.",
                 RuntimeWarning,
             )
     print("Using default NUM_CLASSES:", default)
@@ -212,35 +207,24 @@ def exp_dir(config):
     backbone_lr = config["BACKBONE_LR"]
     head_lr = config["HEAD_LR"]
     if kind == "phase2":
-        name = (
-            f"{backbone}_{config['LOSS_NAME']}"
-            f"_blr_{float_tag(backbone_lr)}"
-            f"_hlr_{float_tag(head_lr)}"
-        )
+        name = f"{backbone}_{config['LOSS_NAME']}_blr_{float_tag(backbone_lr)}_hlr_{float_tag(head_lr)}"
     elif kind == "proposed4_1":
         name = (
             f"{backbone}_proposed4_quality_gate_comp_adaptive_soft_gated_ada_curricular"
-            f"_blr_{float_tag(backbone_lr)}"
-            f"_hlr_{float_tag(head_lr)}"
+            f"_blr_{float_tag(backbone_lr)}_hlr_{float_tag(head_lr)}"
         )
     elif kind == "proposed4_2":
         name = (
             f"{backbone}_proposed4_2_ui_aware"
-            f"_uil_{float_tag(config['UI_LAMBDA'])}"
-            f"_rho_{float_tag(config['UI_RHO'])}"
-            f"_tri_{float_tag(config['UI_TAU_RI'])}"
-            f"_blr_{float_tag(backbone_lr)}"
-            f"_hlr_{float_tag(head_lr)}"
+            f"_uil_{float_tag(config['UI_LAMBDA'])}_rho_{float_tag(config['UI_RHO'])}"
+            f"_tri_{float_tag(config['UI_TAU_RI'])}_blr_{float_tag(backbone_lr)}_hlr_{float_tag(head_lr)}"
         )
     elif kind == "proposed4_3":
         name = (
             f"{backbone}_proposed4_3_multi_ui_attention"
-            f"_uil_{float_tag(config['UI_LAMBDA'])}"
-            f"_rho_{float_tag(config['UI_RHO'])}"
-            f"_tri_{float_tag(config['UI_TAU_RI'])}"
-            f"_ag_{float_tag(config.get('ATTENTION_GAMMA', 0.05))}"
-            f"_blr_{float_tag(backbone_lr)}"
-            f"_hlr_{float_tag(head_lr)}"
+            f"_uil_{float_tag(config['UI_LAMBDA'])}_rho_{float_tag(config['UI_RHO'])}"
+            f"_tri_{float_tag(config['UI_TAU_RI'])}_ag_{float_tag(config.get('ATTENTION_GAMMA', 0.05))}"
+            f"_blr_{float_tag(backbone_lr)}_hlr_{float_tag(head_lr)}"
         )
     else:
         raise ValueError(f"Unknown RUNNER_KIND: {kind}")
@@ -294,20 +278,12 @@ def restore_previous_outputs(config):
         with zipfile.ZipFile(zip_candidate, "r") as archive:
             archive.extractall(restore_dir)
         if not copy_restored_output(config, restore_dir):
-            raise RuntimeError(
-                f"Backup zip did not contain {config['OUTPUT_SUBDIR']}: {zip_candidate}"
-            )
+            raise RuntimeError(f"Backup zip did not contain {config['OUTPUT_SUBDIR']}: {zip_candidate}")
         return True
 
-    folder_candidates = [
-        INPUT_ROOT / backup_stem,
-        INPUT_ROOT / backup_stem / config["OUTPUT_SUBDIR"],
-    ]
+    folder_candidates = [INPUT_ROOT / backup_stem, INPUT_ROOT / backup_stem / config["OUTPUT_SUBDIR"]]
     folder_candidates.extend(directory / backup_stem for directory in input_dirs(max_depth=2))
-    folder_candidates.extend(
-        directory / backup_stem / config["OUTPUT_SUBDIR"]
-        for directory in input_dirs(max_depth=2)
-    )
+    folder_candidates.extend(directory / backup_stem / config["OUTPUT_SUBDIR"] for directory in input_dirs(max_depth=2))
     for folder_candidate in unique_existing(folder_candidates):
         print("Restoring previous backup folder:", folder_candidate)
         if copy_restored_output(config, folder_candidate):
@@ -333,48 +309,28 @@ def run_degraded_eval(config, current_exp_dir, eval_dir):
 
     best_checkpoint = Path(current_exp_dir) / "best.pth"
     if not best_checkpoint.exists():
-        warnings.warn(
-            f"Missing best.pth for degraded eval: {best_checkpoint}. Skipping.",
-            RuntimeWarning,
-        )
+        warnings.warn(f"Missing best.pth for degraded eval: {best_checkpoint}. Skipping.", RuntimeWarning)
         return
 
-    missing_bins = [
-        target for target in config["DEGRADED_TARGETS"]
-        if not (eval_dir / f"{target}.bin").exists()
-    ]
+    missing_bins = [target for target in config["DEGRADED_TARGETS"] if not (eval_dir / f"{target}.bin").exists()]
     if missing_bins:
-        raise FileNotFoundError(
-            "Missing degraded eval bins in "
-            f"{eval_dir}: {', '.join(missing_bins)}"
-        )
+        raise FileNotFoundError(f"Missing degraded eval bins in {eval_dir}: {', '.join(missing_bins)}")
 
     import torch
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     degraded_cmd = [
         sys.executable,
         "eval_degraded_6phase2.py",
-        "--backbone",
-        config["BACKBONE"],
-        "--checkpoint",
-        str(best_checkpoint),
-        "--checkpoint-label",
-        Path(current_exp_dir).name,
-        "--data-dir",
-        str(eval_dir),
-        "--output",
-        str(Path(current_exp_dir) / "degraded_eval"),
-        "--targets",
-        ",".join(config["DEGRADED_TARGETS"]),
-        "--degradations",
-        ",".join(config["DEGRADED_DEGRADATIONS"]),
-        "--severities",
-        str(config["DEGRADED_SEVERITIES"]),
-        "--batch-size",
-        str(config["DEGRADED_BATCH_SIZE"]),
-        "--device",
-        device,
+        "--backbone", config["BACKBONE"],
+        "--checkpoint", str(best_checkpoint),
+        "--checkpoint-label", Path(current_exp_dir).name,
+        "--data-dir", str(eval_dir),
+        "--output", str(Path(current_exp_dir) / "degraded_eval"),
+        "--targets", ",".join(config["DEGRADED_TARGETS"]),
+        "--degradations", ",".join(config["DEGRADED_DEGRADATIONS"]),
+        "--severities", str(config["DEGRADED_SEVERITIES"]),
+        "--batch-size", str(config["DEGRADED_BATCH_SIZE"]),
+        "--device", device,
     ]
     if config.get("USE_FP16", True):
         degraded_cmd.append("--fp16")
@@ -384,30 +340,16 @@ def run_degraded_eval(config, current_exp_dir, eval_dir):
 def add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes):
     option_names = {
         "phase2": {
-            "batch_size": "--batch-size",
-            "backbone_lr": "--backbone-lr",
-            "head_lr": "--head-lr",
-            "warmup_epochs": "--warmup-epochs",
-            "eval_every": "--eval-every",
-            "save_every": "--save-every",
-            "save_every_steps": "--save-every-steps",
-            "max_train_minutes": "--max-train-minutes",
-            "num_workers": "--num-workers",
-            "num_classes": "--num-classes",
-            "eval_targets": "--val-targets",
+            "batch_size": "--batch-size", "backbone_lr": "--backbone-lr", "head_lr": "--head-lr",
+            "warmup_epochs": "--warmup-epochs", "eval_every": "--eval-every", "save_every": "--save-every",
+            "save_every_steps": "--save-every-steps", "max_train_minutes": "--max-train-minutes",
+            "num_workers": "--num-workers", "num_classes": "--num-classes", "eval_targets": "--val-targets",
         },
         "proposed": {
-            "batch_size": "--batch_size",
-            "backbone_lr": "--backbone_lr",
-            "head_lr": "--head_lr",
-            "warmup_epochs": "--warmup_epochs",
-            "eval_every": "--eval_every",
-            "save_every": "--save_every",
-            "save_every_steps": "--save_every_steps",
-            "max_train_minutes": "--max_train_minutes",
-            "num_workers": "--num_workers",
-            "num_classes": "--num_classes",
-            "eval_targets": "--eval_targets",
+            "batch_size": "--batch_size", "backbone_lr": "--backbone_lr", "head_lr": "--head_lr",
+            "warmup_epochs": "--warmup_epochs", "eval_every": "--eval_every", "save_every": "--save_every",
+            "save_every_steps": "--save_every_steps", "max_train_minutes": "--max_train_minutes",
+            "num_workers": "--num_workers", "num_classes": "--num_classes", "eval_targets": "--eval_targets",
         },
     }
     names = option_names["phase2" if config["RUNNER_KIND"] == "phase2" else "proposed"]
@@ -436,19 +378,13 @@ def add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes):
 
 def build_phase2_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes):
     cmd = [
-        sys.executable,
-        "train_phase2_kaggle.py",
-        "--loss",
-        config["LOSS_NAME"],
-        "--backbone",
-        config["BACKBONE"],
-        "--output-dir",
-        str(output_root(config)),
-        "--epochs",
-        str(config["EPOCHS"]),
+        sys.executable, "train_phase2_kaggle.py",
+        "--loss", config["LOSS_NAME"],
+        "--backbone", config["BACKBONE"],
+        "--output-dir", str(output_root(config)),
+        "--epochs", str(config["EPOCHS"]),
     ]
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
-
     latest = Path(current_exp_dir) / "latest.pt"
     if latest.exists():
         print(f"[RESUME] {config['LOSS_NAME']} from {latest}")
@@ -462,63 +398,40 @@ def build_phase2_command(config, current_exp_dir, train_data_dir, eval_dir, num_
 
 def build_proposed_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes):
     cmd = [
-        sys.executable,
-        "train_soft_gated_lambda_kaggle.py",
-        "--loss",
-        config["LOSS_NAME"],
-        "--network",
-        config["BACKBONE"],
-        "--s",
-        str(config["S"]),
-        "--m",
-        str(config["M"]),
-        "--h",
-        str(config["H"]),
-        "--output_dir",
-        str(output_root(config)),
-        "--epochs",
-        str(config["EPOCHS"]),
+        sys.executable, "train_soft_gated_lambda_kaggle.py",
+        "--loss", config["LOSS_NAME"],
+        "--network", config["BACKBONE"],
+        "--s", str(config["S"]),
+        "--m", str(config["M"]),
+        "--h", str(config["H"]),
+        "--output_dir", str(output_root(config)),
+        "--epochs", str(config["EPOCHS"]),
     ]
-
     if config["RUNNER_KIND"] == "proposed4_2":
         cmd.extend([
-            "--ui_lambda", str(config["UI_LAMBDA"]),
-            "--ui_rho", str(config["UI_RHO"]),
-            "--ui_tau_ri", str(config["UI_TAU_RI"]),
-            "--ui_tau_easy", str(config["UI_TAU_EASY"]),
-            "--ui_d_margin", str(config["UI_D_MARGIN"]),
-            "--ui_alpha", str(config["UI_ALPHA"]),
-            "--ui_beta", str(config["UI_BETA"]),
-            "--ui_hard_boost", str(config["UI_HARD_BOOST"]),
+            "--ui_lambda", str(config["UI_LAMBDA"]), "--ui_rho", str(config["UI_RHO"]),
+            "--ui_tau_ri", str(config["UI_TAU_RI"]), "--ui_tau_easy", str(config["UI_TAU_EASY"]),
+            "--ui_d_margin", str(config["UI_D_MARGIN"]), "--ui_alpha", str(config["UI_ALPHA"]),
+            "--ui_beta", str(config["UI_BETA"]), "--ui_hard_boost", str(config["UI_HARD_BOOST"]),
             "--ui_dangerous_downweight", str(config["UI_DANGEROUS_DOWNWEIGHT"]),
             "--ui_sample_weight_min", str(config["UI_SAMPLE_WEIGHT_MIN"]),
             "--ui_center_momentum", str(config["UI_CENTER_MOMENTUM"]),
             "--ui_center_update_interval", str(config["UI_CENTER_UPDATE_INTERVAL"]),
         ])
-
     if config["RUNNER_KIND"] == "proposed4_3":
         cmd.extend([
-            "--ui_lambda", str(config["UI_LAMBDA"]),
-            "--ui_rho", str(config["UI_RHO"]),
-            "--ui_tau_ri", str(config["UI_TAU_RI"]),
-            "--ui_tau_easy", str(config["UI_TAU_EASY"]),
-            "--ui_d_margin", str(config["UI_D_MARGIN"]),
-            "--ui_alpha", str(config["UI_ALPHA"]),
-            "--ui_beta", str(config["UI_BETA"]),
-            "--ui_hard_boost", str(config["UI_HARD_BOOST"]),
+            "--ui_lambda", str(config["UI_LAMBDA"]), "--ui_rho", str(config["UI_RHO"]),
+            "--ui_tau_ri", str(config["UI_TAU_RI"]), "--ui_tau_easy", str(config["UI_TAU_EASY"]),
+            "--ui_d_margin", str(config["UI_D_MARGIN"]), "--ui_alpha", str(config["UI_ALPHA"]),
+            "--ui_beta", str(config["UI_BETA"]), "--ui_hard_boost", str(config["UI_HARD_BOOST"]),
             "--ui_dangerous_downweight", str(config["UI_DANGEROUS_DOWNWEIGHT"]),
             "--ui_sample_weight_min", str(config["UI_SAMPLE_WEIGHT_MIN"]),
             "--multi-ui-centers", str(config["MULTI_UI_CENTERS"]),
         ])
         if config.get("ENABLE_ATTENTION", False):
             cmd.append("--enable-attention")
-            cmd.extend([
-                "--attention-gamma", str(config.get("ATTENTION_GAMMA", 0.05)),
-                "--attention-reduction", str(config.get("ATTENTION_REDUCTION", 16)),
-            ])
-
+            cmd.extend(["--attention-gamma", str(config.get("ATTENTION_GAMMA", 0.05)), "--attention-reduction", str(config.get("ATTENTION_REDUCTION", 16))])
     add_common_train_args(config, cmd, train_data_dir, eval_dir, num_classes)
-
     latest = Path(current_exp_dir) / "latest.pt"
     if latest.exists():
         print(f"[RESUME] {config['LOSS_NAME']} from {latest}")
@@ -542,7 +455,6 @@ def export_eval_csv(config):
     except Exception as exc:
         print("Could not import pandas; skipping CSV export:", exc)
         return None
-
     rows = []
     metrics_root = output_root(config) / config["OUTPUT_SUBDIR"]
     for metrics_path in sorted(metrics_root.glob("*/metrics.json")):
@@ -566,7 +478,6 @@ def export_eval_csv(config):
                 row[f"{name}_std"] = item.get("std")
                 row[f"{name}_xnorm"] = item.get("xnorm")
             rows.append(row)
-
     df = pd.DataFrame(rows)
     out_csv = Path("/kaggle/working") / f"{Path(config['BACKUP_ZIP_NAME']).stem}_eval_by_epoch.csv"
     df.to_csv(out_csv, index=False)
@@ -610,18 +521,11 @@ def write_backup(config):
     zip_path = Path("/kaggle/working") / config["BACKUP_ZIP_NAME"]
     if zip_path.exists():
         zip_path.unlink()
-
     output_subdir = output_root(config) / config["OUTPUT_SUBDIR"]
     if not output_subdir.exists():
         print("No outputs to back up yet:", output_subdir)
         return None
-
-    shutil.make_archive(
-        str(zip_path.with_suffix("")),
-        "zip",
-        str(output_root(config)),
-        config["OUTPUT_SUBDIR"],
-    )
+    shutil.make_archive(str(zip_path.with_suffix("")), "zip", str(output_root(config)), config["OUTPUT_SUBDIR"])
     print("Saved:", zip_path)
     print("Size MB:", zip_path.stat().st_size / 1024 / 1024)
     try:
@@ -668,9 +572,21 @@ def generate_report(config):
         return None
 
 
+def normalize_protocol_config(config):
+    config.setdefault("DEGRADED_SEVERITIES", DEFAULT_DEGRADED_SEVERITIES)
+    if str(config.get("DEGRADED_SEVERITIES", "")).strip() == "5":
+        config["DEGRADED_SEVERITIES"] = DEFAULT_DEGRADED_SEVERITIES
+    backup_name = str(config.get("BACKUP_ZIP_NAME", ""))
+    if backup_name.endswith("_s5.zip"):
+        config["BACKUP_ZIP_NAME"] = backup_name[:-7] + "_s135.zip"
+    elif "degraded_s5" in backup_name:
+        config["BACKUP_ZIP_NAME"] = backup_name.replace("degraded_s5", "degraded_s135")
+    return config
+
+
 def run_5eval_degraded_runner(config):
     start_time = time.time()
-    config = dict(config)
+    config = normalize_protocol_config(dict(config))
     config.setdefault("TRAIN_DATA_DIR", DEFAULT_TRAIN_DATA_DIR)
     config.setdefault("EVAL_DIR", DEFAULT_EVAL_DIR)
     config.setdefault("PRETRAINED_BACKBONE", DEFAULT_PRETRAINED_BACKBONE)
@@ -688,20 +604,7 @@ def run_5eval_degraded_runner(config):
 
     os.chdir(ARCFACE_DIR)
     print("Working dir:", Path.cwd())
-    run([
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "tensorboard",
-        "easydict",
-        "onnx",
-        "opencv-python",
-        "scikit-learn",
-        "pandas",
-        "matplotlib",
-    ])
+    run([sys.executable, "-m", "pip", "install", "-q", "tensorboard", "easydict", "onnx", "opencv-python", "scikit-learn", "pandas", "matplotlib"])
 
     train_data_dir = resolve_train_data_dir(config["TRAIN_DATA_DIR"])
     eval_dir = resolve_eval_dir(train_data_dir, config["EVAL_TARGETS"])
@@ -712,7 +615,6 @@ def run_5eval_degraded_runner(config):
     preflight_compile(config)
 
     import torch
-
     print("TRAIN_DATA_DIR:", train_data_dir)
     print("EVAL_DIR:", eval_dir)
     print("OUTPUT_ROOT:", output_root(config))
@@ -731,25 +633,16 @@ def run_5eval_degraded_runner(config):
 
     current_exp_dir = exp_dir(config)
     if is_complete(config, current_exp_dir):
-        print(
-            f"[SKIP] {config['LOSS_NAME']} already has at least "
-            f"{config['EPOCHS']} epochs: {current_exp_dir}"
-        )
+        print(f"[SKIP] {config['LOSS_NAME']} already has at least {config['EPOCHS']} epochs: {current_exp_dir}")
         run_degraded_eval(config, current_exp_dir, eval_dir)
     else:
-        print(
-            f"[TRAIN] loss={config['LOSS_NAME']} epochs={config['EPOCHS']} "
-            f"backbone_lr={config['BACKBONE_LR']} head_lr={config['HEAD_LR']}"
-        )
+        print(f"[TRAIN] loss={config['LOSS_NAME']} epochs={config['EPOCHS']} backbone_lr={config['BACKBONE_LR']} head_lr={config['HEAD_LR']}")
         train_cmd = build_train_command(config, current_exp_dir, train_data_dir, eval_dir, num_classes)
         run(train_cmd, cwd=ARCFACE_DIR)
         if is_complete(config, current_exp_dir):
             run_degraded_eval(config, current_exp_dir, eval_dir)
         else:
-            print(
-                f"[STOP] {config['LOSS_NAME']} is not complete yet. "
-                f"Resume next session: {current_exp_dir}"
-            )
+            print(f"[STOP] {config['LOSS_NAME']} is not complete yet. Resume next session: {current_exp_dir}")
 
     print("Epochs recorded:", read_epoch_count(current_exp_dir / "metrics.json"))
     print("latest.pt:", (current_exp_dir / "latest.pt").exists())
