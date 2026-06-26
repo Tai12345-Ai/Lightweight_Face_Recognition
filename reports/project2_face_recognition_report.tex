@@ -1,0 +1,558 @@
+\documentclass[13pt,a4paper]{extreport}
+
+% =========================
+% Project 2 Report: Face Recognition
+% Compile: pdflatex project2_face_recognition_report.tex
+% =========================
+
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage{newtxtext,newtxmath}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{float}
+
+\geometry{top=3.5cm,bottom=3cm,left=2.5cm,right=2.5cm}
+\onehalfspacing
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{1.0cm}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\newcommand{\projecttitle}{Nghiên cứu và cải tiến hàm mất mát cho nhận dạng khuôn mặt trong điều kiện chất lượng thấp}
+\newcommand{\repo}{\url{https://github.com/Tai12345-Ai/Lightweight_Face_Recognition}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\sg}{\operatorname{sg}}
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\ReLU}{\operatorname{ReLU}}
+
+\begin{document}
+
+% =========================================================
+% TRANG BÌA
+% =========================================================
+\begin{titlepage}
+    \centering
+    {\bfseries BỘ GIÁO DỤC VÀ ĐÀO TẠO\\}
+    {\bfseries ĐẠI HỌC BÁCH KHOA HÀ NỘI\\}
+    \vspace{1.5cm}
+
+    {\Large\bfseries BÁO CÁO PROJECT 2\\}
+    \vspace{0.8cm}
+    {\Large\bfseries \projecttitle\\}
+    \vspace{1.0cm}
+
+    \begin{flushleft}
+    \textbf{Học phần:} Project 2\\
+    \textbf{Chủ đề:} Deep Face Recognition, Margin-based Loss, Low-quality Robustness\\
+    \textbf{Sinh viên:} ................................................\\
+    \textbf{Mã số sinh viên:} ................................................\\
+    \textbf{Giảng viên hướng dẫn:} ................................................\\
+    \textbf{Mã nguồn triển khai:} \repo
+    \end{flushleft}
+
+    \vfill
+    {\bfseries Hà Nội -- 2026}
+\end{titlepage}
+
+% =========================================================
+% CAM KẾT
+% =========================================================
+\chapter*{Cam kết về tính trung thực của nội dung}
+\addcontentsline{toc}{chapter}{Cam kết về tính trung thực của nội dung}
+Em xin cam kết nội dung báo cáo này được tổng hợp, phân tích và trình bày dựa trên quá trình tìm hiểu lý thuyết, đọc các công trình nền tảng về nhận dạng khuôn mặt, đồng thời triển khai và đánh giá thực nghiệm trên mã nguồn của project. Các kết quả, công thức và nhận xét được trình bày trung thực theo phạm vi thực hiện. Những nội dung kế thừa từ các công trình trước được trích dẫn trong phần tài liệu tham khảo.
+
+\newpage
+\tableofcontents
+\newpage
+\listoftables
+\newpage
+
+\chapter*{Danh sách từ viết tắt}
+\addcontentsline{toc}{chapter}{Danh sách từ viết tắt}
+\begin{longtable}{p{3cm}p{10cm}}
+\toprule
+\textbf{Từ viết tắt} & \textbf{Ý nghĩa}\\
+\midrule
+FR & Face Recognition -- nhận dạng khuôn mặt\\
+DCNN & Deep Convolutional Neural Network -- mạng tích chập sâu\\
+HQ & High Quality -- ảnh chất lượng cao\\
+LQ & Low Quality -- ảnh chất lượng thấp\\
+VLR & Very Low Resolution -- độ phân giải rất thấp\\
+RI & Recognizability Index -- chỉ số khả nhận dạng\\
+UI & Unrecognizable Identity -- cụm danh tính không còn đủ thông tin nhận dạng\\
+CE & Cross Entropy\\
+FAR & False Acceptance Rate\\
+TAR & True Acceptance Rate\\
+\bottomrule
+\end{longtable}
+
+% =========================================================
+\chapter{Giới thiệu bài toán}
+
+\section{Bối cảnh và động lực}
+Nhận dạng khuôn mặt là một bài toán sinh trắc học quan trọng, được sử dụng trong xác thực danh tính, kiểm soát truy cập, giám sát an ninh và nhiều hệ thống tương tác người--máy. Một hệ thống nhận dạng khuôn mặt hiện đại thường gồm ba bước chính: phát hiện khuôn mặt, căn chỉnh khuôn mặt và trích xuất biểu diễn đặc trưng. Sau khi có vector đặc trưng, hệ thống so sánh độ tương đồng giữa hai khuôn mặt bằng các độ đo như cosine similarity.
+
+Về mặt học biểu diễn, mục tiêu cốt lõi là ánh xạ ảnh khuôn mặt $I$ sang một embedding $x \in \R^d$ sao cho:
+\begin{itemize}[leftmargin=1.2cm]
+    \item các ảnh cùng danh tính có embedding gần nhau;
+    \item các ảnh khác danh tính có embedding cách xa nhau;
+    \item biểu diễn vẫn ổn định khi ảnh bị biến thiên bởi tư thế, ánh sáng, tuổi tác, nhiễu, mờ, nén JPEG, giảm độ phân giải hoặc sai lệch căn chỉnh.
+\end{itemize}
+
+Các phương pháp hiện đại thường huấn luyện mô hình theo bài toán phân loại danh tính trên tập train, nhưng khi suy luận lại dùng embedding cho bài toán open-set verification/identification. Vì vậy, hàm mất mát không chỉ cần phân loại tốt các danh tính trong train, mà còn phải tạo ra không gian embedding có tính phân biệt và tổng quát hóa tốt cho danh tính chưa xuất hiện trong huấn luyện.
+
+\section{Vấn đề trong điều kiện ảnh chất lượng thấp}
+Trong điều kiện thực tế, ảnh khuôn mặt có thể bị suy giảm bởi nhiều yếu tố: mờ Gaussian, mờ chuyển động, độ phân giải thấp, nén JPEG, thiếu sáng, occlusion hoặc sai lệch alignment. Với ảnh chất lượng thấp, mô hình dễ gặp hai vấn đề:
+\begin{enumerate}[leftmargin=1.2cm]
+    \item \textbf{Hard-but-recognizable}: ảnh khó nhưng vẫn còn đủ tín hiệu danh tính. Mô hình nên khai thác các ảnh này để tăng độ bền vững.
+    \item \textbf{Unrecognizable}: ảnh đã mất quá nhiều thông tin danh tính. Nếu ép mô hình học mạnh trên các ảnh này, embedding có thể học nhiễu hoặc đặc trưng ngoài danh tính.
+\end{enumerate}
+
+Do đó, bài toán của project không chỉ là tăng margin cố định như các loss cổ điển, mà là thiết kế cơ chế thích nghi theo độ khó, chất lượng và mức độ cạnh tranh giữa positive class và negative classes.
+
+\section{Mục tiêu của báo cáo}
+Báo cáo này tập trung vào ba nhóm nội dung:
+\begin{itemize}[leftmargin=1.2cm]
+    \item tổng quan lý thuyết nhận dạng khuôn mặt dựa trên margin-based softmax loss;
+    \item phân tích các baseline quan trọng: CosFace, ArcFace, AdaFace và CurricularFace;
+    \item trình bày hướng cải tiến của project, đặc biệt là Proposed 4.1 và hướng Proposed 4.3 Core/Full cho ảnh chất lượng thấp.
+\end{itemize}
+
+% =========================================================
+\chapter{Tổng quan bài toán nhận dạng khuôn mặt}
+
+\section{Pipeline nhận dạng khuôn mặt}
+Một pipeline nhận dạng khuôn mặt điển hình gồm:
+\begin{equation}
+    I \xrightarrow{\text{detection}} B \xrightarrow{\text{alignment}} I_a \xrightarrow{f_\theta} x \xrightarrow{\text{matching}} s(x_1,x_2),
+\end{equation}
+trong đó $I$ là ảnh đầu vào, $B$ là vùng mặt, $I_a$ là ảnh đã căn chỉnh, $f_\theta$ là mạng trích xuất đặc trưng, và $s(x_1,x_2)$ thường là cosine similarity.
+
+Với embedding đã chuẩn hóa $\hat{x}=x/\norm{x}$, độ tương đồng giữa hai ảnh là:
+\begin{equation}
+    s(\hat{x}_1,\hat{x}_2)=\hat{x}_1^\top \hat{x}_2 = \cos(\theta).
+\end{equation}
+Nếu $s$ lớn hơn ngưỡng, hệ thống quyết định hai ảnh thuộc cùng danh tính; ngược lại là khác danh tính.
+
+\section{Sample-to-class và sample-to-sample}
+Có hai hướng huấn luyện chính:
+\begin{itemize}[leftmargin=1.2cm]
+    \item \textbf{Sample-to-sample}: học trực tiếp khoảng cách giữa các cặp hoặc bộ ba ảnh, ví dụ contrastive loss và triplet loss.
+    \item \textbf{Sample-to-class}: học phân loại danh tính bằng softmax hoặc margin-based softmax, trong đó mỗi cột trọng số $W_j$ được xem như prototype/class center của lớp $j$.
+\end{itemize}
+
+Trong project này, hướng chính là sample-to-class vì phù hợp với huấn luyện quy mô lớn. Mỗi mẫu $i$ có embedding $x_i$, nhãn $y_i$, và ma trận classifier $W=[W_1,\ldots,W_C]$. Sau chuẩn hóa:
+\begin{equation}
+    c_j = \hat{x}_i^\top \hat{W}_j = \cos(\theta_j).
+\end{equation}
+
+\section{Softmax chuẩn và hạn chế}
+Softmax chuẩn có loss:
+\begin{equation}
+    L_i = -\log \frac{e^{z_{y_i}}}{e^{z_{y_i}} + \sum_{j\ne y_i} e^{z_j}}.
+\end{equation}
+Softmax giúp tách lớp trong tập train, nhưng chưa trực tiếp ép embedding có margin rõ ràng trên hypersphere. Vì vậy, các phương pháp như CosFace và ArcFace đưa margin vào positive logit để tăng intra-class compactness và inter-class separability.
+
+% =========================================================
+\chapter{Cơ sở lý thuyết các baseline}
+
+\section{CosFace}
+CosFace, hay Large Margin Cosine Loss, chuẩn hóa cả feature và class weights, sau đó đưa margin vào không gian cosine. Với scale $s$ và margin $m$, positive logit được sửa thành:
+\begin{equation}
+    z_{y_i}=s(\cos\theta_{y_i}-m), \qquad z_j=s\cos\theta_j,\; j\ne y_i.
+\end{equation}
+Loss:
+\begin{equation}
+    L_i^{\text{CosFace}}=-\log \frac{e^{s(\cos\theta_{y_i}-m)}}{e^{s(\cos\theta_{y_i}-m)}+\sum_{j\ne y_i} e^{s\cos\theta_j}}.
+\end{equation}
+
+Ý tưởng chính của CosFace là loại bỏ biến thiên theo norm bằng chuẩn hóa L2, sau đó tăng biên quyết định trong không gian cosine. Ưu điểm là đơn giản, ổn định và dễ triển khai. Hạn chế là margin $m$ cố định cho mọi mẫu, không phân biệt ảnh dễ, ảnh khó, ảnh chất lượng thấp hay ảnh gần như không thể nhận dạng.
+
+\section{ArcFace}
+ArcFace đưa margin vào trực tiếp góc $\theta$, tức là tối ưu geodesic distance trên hypersphere. Positive logit:
+\begin{equation}
+    z_{y_i}=s\cos(\theta_{y_i}+m), \qquad z_j=s\cos\theta_j,\; j\ne y_i.
+\end{equation}
+Loss:
+\begin{equation}
+    L_i^{\text{ArcFace}}=-\log \frac{e^{s\cos(\theta_{y_i}+m)}}{e^{s\cos(\theta_{y_i}+m)}+\sum_{j\ne y_i}e^{s\cos\theta_j}}.
+\end{equation}
+
+ArcFace có diễn giải hình học rõ ràng: cùng một identity phải nằm gần class center hơn theo khoảng cách góc, còn khác identity phải tách xa hơn. Đây là baseline quan trọng vì ổn định và mạnh trong nhiều benchmark sạch. Tuy nhiên, với ảnh nhiễu nặng hoặc chất lượng thấp, margin cố định vẫn có thể ép mô hình học các mẫu không còn đủ thông tin danh tính.
+
+\section{AdaFace}
+AdaFace xuất phát từ quan sát rằng feature norm có thể phản ánh chất lượng ảnh. Ảnh chất lượng cao thường tạo embedding có norm lớn hơn, còn ảnh chất lượng thấp hoặc không chắc chắn thường có norm nhỏ hơn. AdaFace dùng norm để tạo một quality indicator:
+\begin{equation}
+    q_i = \clip\left( \frac{\norm{x_i}-\mu}{\sigma+\epsilon}, -1, 1 \right),
+\end{equation}
+trong đó $\mu,\sigma$ là thống kê động của feature norm.
+
+Từ $q_i$, AdaFace điều chỉnh margin để:
+\begin{itemize}[leftmargin=1.2cm]
+    \item nhấn mạnh hard samples nếu ảnh có chất lượng cao;
+    \item tránh ép quá mạnh các ảnh chất lượng thấp, vì chúng có thể là unrecognizable.
+\end{itemize}
+
+Hướng này rất quan trọng cho project vì nó đưa yếu tố quality vào loss, giúp phân biệt hard-but-useful và hard-because-unrecognizable.
+
+\section{CurricularFace}
+CurricularFace đưa curriculum learning vào margin-based face recognition. Thay vì luôn nhấn mạnh hard negatives từ đầu, CurricularFace điều chỉnh mức độ ảnh hưởng của hard samples theo tiến trình huấn luyện.
+
+Về trực giác:
+\begin{itemize}[leftmargin=1.2cm]
+    \item giai đoạn đầu: ưu tiên mẫu dễ để mô hình hội tụ ổn định;
+    \item giai đoạn sau: tăng dần trọng số/mức ảnh hưởng của hard negatives để cải thiện biên phân biệt.
+\end{itemize}
+
+Một cách khái quát, nếu negative class $j$ là hard negative, CurricularFace biến đổi negative cosine theo trạng thái huấn luyện $t$:
+\begin{equation}
+    c_j' = c_j(t+c_j), \qquad \text{với hard negative.}
+\end{equation}
+Cơ chế này phù hợp với bài toán của project vì không chỉ positive margin quan trọng, mà negative competition cũng quyết định độ khó thực sự của mẫu.
+
+\section{So sánh các baseline}
+\begin{table}[H]
+\centering
+\caption{So sánh các baseline margin-based loss}
+\begin{tabular}{p{3cm}p{4cm}p{5cm}}
+\toprule
+\textbf{Phương pháp} & \textbf{Ý tưởng chính} & \textbf{Hạn chế liên quan ảnh chất lượng thấp}\\
+\midrule
+CosFace & Additive cosine margin & Margin cố định, không xét quality hoặc hard negative dynamics\\
+ArcFace & Additive angular margin & Mạnh trên ảnh sạch nhưng có thể ép quá mức ảnh suy giảm nặng\\
+AdaFace & Quality-adaptive margin dựa trên feature norm & Chưa xét trực tiếp cạnh tranh với negative class theo từng mẫu\\
+CurricularFace & Curriculum hard negative mining & Chưa tách rõ hard-but-recognizable và unrecognizable\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =========================================================
+\chapter{Hướng nghiên cứu của project}
+
+\section{Vấn đề cần giải quyết}
+Các baseline mạnh nhưng mỗi phương pháp chỉ xử lý một phần của bài toán:
+\begin{itemize}[leftmargin=1.2cm]
+    \item CosFace/ArcFace tạo margin rõ ràng nhưng margin cố định;
+    \item AdaFace xét quality nhưng chưa xét trực tiếp negative competition;
+    \item CurricularFace xét hard negative nhưng chưa phân biệt chất lượng và mức độ nhận dạng được.
+\end{itemize}
+
+Do đó, hướng nghiên cứu của project là xây dựng một loss kết hợp ba tín hiệu:
+\begin{equation}
+    \text{sample difficulty} + \text{sample quality} + \text{negative competition}.
+\end{equation}
+
+\section{Quan điểm thiết kế}
+Thay vì chỉ tăng margin cố định, project thiết kế margin/gate theo trạng thái của từng mẫu. Một mẫu nên được xử lý mạnh nếu nó:
+\begin{itemize}[leftmargin=1.2cm]
+    \item có negative class cạnh tranh gần với positive class;
+    \item vẫn còn chất lượng/khả năng nhận dạng đủ tốt;
+    \item không phải mẫu suy giảm đến mức embedding trở nên không đáng tin cậy.
+\end{itemize}
+
+Ngược lại, nếu mẫu chất lượng quá thấp, loss không nên ép mô hình học quá mạnh theo nhãn, vì nhãn đúng ở cấp dữ liệu chưa đảm bảo ảnh còn đủ thông tin nhận dạng.
+
+% =========================================================
+\chapter{Proposed 4.1: Competition--Quality Adaptive Soft-Gated Ada-CurricularFace}
+
+\section{Động lực}
+Proposed 4.1 là phiên bản trọng tâm đầu tiên của project. Ý tưởng là kết hợp:
+\begin{itemize}[leftmargin=1.2cm]
+    \item quality-aware margin từ AdaFace;
+    \item hard negative modulation từ CurricularFace;
+    \item competition-aware gate để quyết định khi nào nên áp dụng cơ chế mạnh.
+\end{itemize}
+
+Mục tiêu là giữ độ ổn định của ArcFace/AdaFace trên ảnh sạch, đồng thời cải thiện khả năng chịu suy giảm trên ảnh blur, low-resolution, JPEG, low illumination và alignment perturbation.
+
+\section{Các đại lượng chính}
+Với mẫu $i$, embedding $x_i$, nhãn $y_i$, class weights $W_j$, ta có:
+\begin{equation}
+    c_j = \hat{x}_i^\top \hat{W}_j = \cos\theta_j.
+\end{equation}
+
+Quality proxy dựa trên feature norm:
+\begin{equation}
+    q_i = \clip\left(h\frac{\norm{x_i}-\mu}{\sigma+\epsilon}, -1, 1\right).
+\end{equation}
+
+Positive branch kiểu AdaFace được viết:
+\begin{equation}
+    u_i^+ = \cos(\theta_{y_i}-m q_i) - (m q_i + m).
+\end{equation}
+
+ArcFace anchor:
+\begin{equation}
+    a_i = \cos(\theta_{y_i}+m).
+\end{equation}
+
+Hardest negative:
+\begin{equation}
+    c_i^- = \max_{j\ne y_i} c_j.
+\end{equation}
+
+Competition score:
+\begin{equation}
+    d_i = \clip\left(\frac{\ReLU(c_i^- - a_i)}{1-a_i+\epsilon},0,1\right).
+\end{equation}
+
+Quality factor:
+\begin{equation}
+    \gamma_i = 0.75 + 0.25\clip(q_i,0,1).
+\end{equation}
+
+Soft gate:
+\begin{equation}
+    \lambda_i = h d_i \gamma_i.
+\end{equation}
+
+Threshold giữa ArcFace anchor và quality-adaptive positive branch:
+\begin{equation}
+    \tau_i=(1-\lambda_i)a_i + \lambda_i u_i^+.
+\end{equation}
+
+Nếu negative class $j$ thỏa $c_j>\tau_i$, nó được xem là hard negative và được biến đổi theo CurricularFace:
+\begin{equation}
+    c_j' = c_j(t+c_j).
+\end{equation}
+Positive logit được đặt thành $u_i^+$ và toàn bộ logits được scale bởi $s$ trước khi đưa vào cross entropy.
+
+\section{Ý nghĩa của Proposed 4.1}
+Proposed 4.1 có ba điểm đáng chú ý:
+\begin{enumerate}[leftmargin=1.2cm]
+    \item \textbf{Không kích hoạt cứng}: gate $\lambda_i$ giúp chuyển mềm giữa ArcFace anchor và quality-adaptive branch.
+    \item \textbf{Có nhận thức cạnh tranh}: nếu negative class không nguy hiểm, loss không cần phóng đại hard negative.
+    \item \textbf{Có nhận thức chất lượng}: mẫu có norm thấp không bị đối xử giống mẫu chất lượng cao.
+\end{enumerate}
+
+Vì vậy Proposed 4.1 là một hướng hợp lý cho lightweight face recognition trong điều kiện suy giảm vừa và nặng.
+
+\section{Kết quả thực nghiệm hiện tại}
+Trong các thí nghiệm nội bộ của project với backbone R18 và các tập đánh giá LFW, CFP-FP, CPLFW, AgeDB-30, CALFW, Proposed 4.1 đang là phương án nổi bật nhất về trung bình clean và degraded.
+
+\begin{table}[H]
+\centering
+\caption{Tóm tắt kết quả thực nghiệm hiện tại trong project}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Mô hình} & \textbf{Clean Avg} & \textbf{Degraded Avg} & \textbf{s5 Avg}\\
+\midrule
+Proposed 4.1 & 95.891\% & 90.128\% & 82.250\%\\
+Proposed 4.2 & 95.850\% & 90.100\% & 82.166\%\\
+Proposed 4.3 Core trước & 95.871\% & 90.079\% & 82.122\%\\
+Proposed 4.3 Core hoàn chỉnh & 95.877\% & 89.950\% & 81.800\%\\
+CurricularFace & 95.789\% & 89.910\% & 81.721\%\\
+AdaFace & 95.788\% & 89.815\% & 81.465\%\\
+ArcFace & 95.817\% & 89.717\% & 81.224\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Các kết quả này cho thấy Proposed 4.1 nên được xem là hướng chính hiện tại. Proposed Core/Full nên được trình bày như hướng mở rộng/ablation để kiểm tra giả thuyết về recognizability và UI-aware attention.
+
+% =========================================================
+\chapter{Proposed 4.3 Core và Full Vision}
+
+\section{Động lực từ recognizability và UI cluster}
+Trong ảnh suy giảm nặng, không phải mọi ảnh đều nên được học như nhau. Một số ảnh vẫn còn tín hiệu danh tính, trong khi một số ảnh gần như không thể nhận dạng. Hướng UI/RI xuất phát từ giả thuyết rằng các ảnh không còn đủ thông tin nhận dạng có thể tạo thành một vùng/cụm đặc biệt trong embedding space, gọi là UI cluster.
+
+Mục tiêu của Proposed 4.3 là không chỉ thay đổi margin ở classifier head, mà còn can thiệp vào biểu diễn trước embedding để tăng tín hiệu vùng khuôn mặt còn hữu ích.
+
+\section{Proposed 4.3 Core}
+Core version được thiết kế như bước ổn định trước khi bật các ràng buộc mạnh. Core gồm:
+\begin{itemize}[leftmargin=1.2cm]
+    \item attention path từ feature map $F$ sang feature map đã hiệu chỉnh $F'$;
+    \item multi-UI centers để mô tả nhiều kiểu suy giảm thay vì một UI center duy nhất;
+    \item RI predictor hoặc RI-related signal;
+    \item preserve/anchor/attention regularization để giảm nguy cơ phá embedding identity.
+\end{itemize}
+
+Attention map:
+\begin{equation}
+    A_i=A_\psi(F_i), \qquad A_i\in [0,1]^{C\times H\times W}.
+\end{equation}
+
+Feature sau attention:
+\begin{equation}
+    F_i' = F_i \odot \left(1+\alpha\rho_i^{att}A_i\right),
+\end{equation}
+trong đó $\alpha$ là hệ số khuếch đại và $\rho_i^{att}$ là hệ số điều tiết attention.
+
+Core chủ yếu nhằm kiểm tra câu hỏi: attention có thể cải thiện embedding dưới suy giảm mà không làm giảm identity consistency hay không?
+
+\section{Multi-UI centers}
+Thay vì một UI center duy nhất, project xây dựng nhiều center tương ứng với các nhóm suy giảm:
+\begin{equation}
+    U=\{u_1,u_2,\ldots,u_K\}, \qquad u_k\in\R^{512}.
+\end{equation}
+Ví dụ:
+\begin{equation}
+    U=\{u_{global},u_{blur},u_{motion},u_{lowres},u_{jpeg},u_{illum},u_{align}\}.
+\end{equation}
+
+Với embedding đã chuẩn hóa $v_i$, độ gần UI có thể ước lượng bằng:
+\begin{equation}
+    r_i = \max_k v_i^\top u_k.
+\end{equation}
+Nếu $r_i$ lớn, mẫu có xu hướng gần vùng suy giảm/unrecognizable hơn. Tuy nhiên, cần lưu ý rằng degraded không đồng nghĩa với unrecognizable. Một ảnh bị blur hoặc low-resolution vẫn có thể còn đủ thông tin danh tính. Đây chính là điểm khó của Core/Full.
+
+\section{Full Vision}
+Full version mở rộng Core bằng các ràng buộc mạnh hơn:
+\begin{itemize}[leftmargin=1.2cm]
+    \item \textbf{UI-orthogonal}: đẩy embedding rời khỏi hướng UI nếu mẫu vẫn có thể nhận dạng;
+    \item \textbf{RI loss}: tăng recognizability của hard-but-recognizable samples;
+    \item \textbf{identity-anchor}: giữ embedding gần class đúng;
+    \item \textbf{negative-guard}: tránh attention làm tăng similarity với negative classes;
+    \item \textbf{preserve loss}: giữ ổn định với mẫu dễ hoặc mẫu clean;
+    \item \textbf{attention regularization}: tránh attention map quá cực đoan hoặc học nhiễu.
+\end{itemize}
+
+Một dạng tổng quát của objective Full:
+\begin{equation}
+\begin{aligned}
+    L_{Full} = & L_{4.1} + \lambda_{RI}L_{RI} + \lambda_{UI}L_{UI-orth} \\
+    & + \lambda_{anc}L_{anchor} + \lambda_{neg}L_{neg} + \lambda_{pre}L_{preserve} + \lambda_{att}L_{att}.
+\end{aligned}
+\end{equation}
+
+\section{Quan hệ giữa Core và Full}
+Core và Full không nên hiểu là thay thế hoàn toàn Proposed 4.1 ngay lập tức. Vai trò hợp lý hơn là:
+\begin{equation}
+    \text{4.1: main robust loss} \quad \rightarrow \quad \text{Core/Full: recognizability-aware extension}.
+\end{equation}
+
+Core là bản an toàn hơn vì tắt hoặc giảm các ràng buộc dễ gây lệch identity. Full là bản đầy đủ hơn nhưng rủi ro cao hơn, vì nhiều loss phụ có thể xung đột gradient. Do đó Full nên được đánh giá như một second-stage fine-tuning hoặc ablation thay vì baseline ngang hàng tuyệt đối nếu nó được warm-start từ Core.
+
+% =========================================================
+\chapter{Thiết kế thực nghiệm}
+
+\section{Dữ liệu và backbone}
+Project sử dụng CASIA-WebFace cho huấn luyện và các tập đánh giá chuẩn như LFW, CFP-FP, CPLFW, AgeDB-30, CALFW. Backbone chính trong các thí nghiệm lightweight là ResNet-18 hoặc các biến thể nhỏ phù hợp với mục tiêu triển khai nhẹ.
+
+\section{Giao thức đánh giá}
+Giao thức đánh giá gồm hai phần:
+\begin{itemize}[leftmargin=1.2cm]
+    \item \textbf{Clean evaluation}: đánh giá trên các benchmark gốc.
+    \item \textbf{Degraded evaluation}: tạo suy giảm tổng hợp với nhiều mức severity, đặc biệt là $s=1,3,5$.
+\end{itemize}
+
+Các degradation chính:
+\begin{equation}
+    \{\text{gaussian blur},\text{ motion blur},\text{ low resolution},\text{ JPEG},\text{ low illumination},\text{ alignment perturbation}\}.
+\end{equation}
+
+\section{Tiêu chí lựa chọn mô hình}
+Một mô hình được xem là tốt nếu thỏa đồng thời:
+\begin{itemize}[leftmargin=1.2cm]
+    \item clean accuracy không giảm đáng kể;
+    \item degraded average tăng so với ArcFace/AdaFace/CurricularFace;
+    \item severity 5 tăng, vì đây là điều kiện khó nhất;
+    \item training ổn định, không cần quá nhiều stage phức tạp.
+\end{itemize}
+
+% =========================================================
+\chapter{Nhận xét và hướng phát triển}
+
+\section{Đánh giá Proposed 4.1}
+Proposed 4.1 có ưu điểm là công thức tập trung, ít thành phần phụ, dễ triển khai và kết quả hiện tại tốt nhất trong nhóm so sánh. Về mặt báo cáo Project 2, đây nên là đóng góp chính vì nó kết hợp hợp lý giữa quality, competition và curriculum.
+
+\section{Đánh giá Core/Full}
+Core/Full có ý tưởng nghiên cứu sâu hơn, đặc biệt liên quan đến recognizability và UI-aware attention. Tuy nhiên, hướng này có các rủi ro:
+\begin{itemize}[leftmargin=1.2cm]
+    \item UI centers được xây từ degraded samples có thể trở thành degradation-type centers, không phải unrecognizable identity centers thật sự;
+    \item attention có thể khuếch đại nhiễu hoặc chi tiết không mang identity;
+    \item Full có nhiều loss phụ, dễ gây xung đột gradient;
+    \item nếu Full được train sau Core, cần trình bày là two-stage extension để đảm bảo công bằng thực nghiệm.
+\end{itemize}
+
+\section{Hướng cải tiến tiếp theo}
+Các hướng cải tiến khả thi:
+\begin{enumerate}[leftmargin=1.2cm]
+    \item Giữ Proposed 4.1 làm main method.
+    \item Thử severity-aware gate để điều chỉnh theo mức suy giảm.
+    \item Tách rõ hard-but-recognizable và unrecognizable bằng tiêu chí RI ổn định hơn.
+    \item Giảm số loss phụ trong Full hoặc fine-tune Full ngắn 3--5 epoch thay vì train thêm 20 epoch.
+    \item Đánh giá thêm trên low-quality benchmark thực tế nếu có điều kiện, ví dụ TinyFace hoặc IJB-S.
+\end{enumerate}
+
+% =========================================================
+\chapter{Kết luận}
+Báo cáo đã trình bày bài toán nhận dạng khuôn mặt trong điều kiện chất lượng thấp, tổng quan pipeline deep face recognition và các baseline margin-based loss quan trọng gồm CosFace, ArcFace, AdaFace và CurricularFace. Từ các baseline này, project xây dựng hướng Proposed 4.1 bằng cách kết hợp quality-adaptive margin, competition-aware gate và hard negative curriculum. Kết quả thực nghiệm hiện tại cho thấy Proposed 4.1 là hướng mạnh nhất và nên được chọn làm phương pháp chính.
+
+Bên cạnh đó, báo cáo cũng trình bày Proposed 4.3 Core/Full như một hướng mở rộng dựa trên recognizability, multi-UI centers và attention. Core/Full có tiềm năng về mặt ý tưởng nhưng cần được đánh giá thận trọng, đặc biệt khi Full được huấn luyện theo dạng second-stage fine-tuning từ Core. Do đó, kết luận hiện tại là: Proposed 4.1 là đóng góp chính ổn định; Core/Full là hướng nghiên cứu nâng cao để tiếp tục kiểm chứng.
+
+% =========================================================
+\appendix
+\chapter{Phụ lục: Gợi ý hình vẽ cho báo cáo}
+\begin{itemize}[leftmargin=1.2cm]
+    \item Hình 1: Pipeline face recognition: detection -- alignment -- embedding -- matching.
+    \item Hình 2: So sánh decision margin của CosFace và ArcFace trên hypersphere.
+    \item Hình 3: Sơ đồ Proposed 4.1 gồm quality branch, competition gate và hard negative modulation.
+    \item Hình 4: Sơ đồ Core/Full gồm feature map $F$, attention map $A$, feature $F'$, embedding $x'$ và multi-UI centers.
+\end{itemize}
+
+\chapter{Phụ lục: Pseudocode Proposed 4.1}
+\begin{verbatim}
+Input: embedding x_i, label y_i, class weights W, scale s, margin m
+Normalize x_i and W_j
+Compute c_j = cos(theta_j)
+Compute q_i from feature norm
+Compute AdaFace-like positive u_i^+
+Compute ArcFace anchor a_i
+Find hardest negative c_i^-
+Compute competition score d_i
+Compute quality factor gamma_i
+Compute gate lambda_i = h d_i gamma_i
+Compute threshold tau_i = (1-lambda_i)a_i + lambda_i u_i^+
+For each negative j:
+    if c_j > tau_i:
+        c_j = c_j * (t + c_j)
+Set positive logit to u_i^+
+Apply scale s and cross entropy
+\end{verbatim}
+
+% =========================================================
+\begin{thebibliography}{99}
+
+\bibitem{cosface}
+H. Wang, Y. Wang, Z. Zhou, X. Ji, D. Gong, J. Zhou, Z. Li, and W. Liu, ``CosFace: Large Margin Cosine Loss for Deep Face Recognition,'' CVPR, 2018.
+
+\bibitem{arcface}
+J. Deng, J. Guo, N. Xue, and S. Zafeiriou, ``ArcFace: Additive Angular Margin Loss for Deep Face Recognition,'' CVPR, 2019.
+
+\bibitem{adaface}
+M. Kim, A. K. Jain, and X. Liu, ``AdaFace: Quality Adaptive Margin for Face Recognition,'' CVPR, 2022.
+
+\bibitem{curricularface}
+Y. Huang, Y. Wang, Y. Tai, X. Liu, P. Shen, S. Li, J. Li, and F. Huang, ``CurricularFace: Adaptive Curriculum Learning Loss for Deep Face Recognition,'' CVPR, 2020.
+
+\bibitem{magface}
+Q. Meng, S. Zhao, Z. Huang, and F. Zhou, ``MagFace: A Universal Representation for Face Recognition and Quality Assessment,'' CVPR, 2021.
+
+\bibitem{recognizability}
+S. Deng, Y. Xiong, M. Wang, W. Xia, and S. Soatto, ``Harnessing Unrecognizable Faces for Improving Face Recognition,'' ICCV, 2021.
+
+\bibitem{vlrfr}
+J. C. L. Chai, T.-S. Ng, C.-Y. Low, J. Park, and A. B. J. Teoh, ``Recognizability Embedding Enhancement for Very Low-Resolution Face Recognition and Quality Estimation,'' 2023.
+
+\bibitem{survey}
+H. Du, H. Shi, D. Zeng, X.-P. Zhang, and T. Mei, ``The Elements of End-to-end Deep Face Recognition: A Survey of Recent Advances,'' ACM Computing Surveys, 2021.
+
+\bibitem{repo}
+T. Nguyen, ``Lightweight Face Recognition Repository,'' GitHub, \repo.
+
+\end{thebibliography}
+
+\end{document}
