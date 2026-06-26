@@ -1,15 +1,15 @@
 # %% [markdown]
 # # Proposed 4.3 Core 20-Epoch 5-Eval + Synthetic Degraded Eval Kaggle Runner
 #
-# Core:
-# - true Core wrapper: F -> attention -> F' -> x';
-# - RI predictor, recoverability gate, weighted FR, preserve, anchor;
-# - UI-orthogonal, negative-guard and EMA UI prototypes stay disabled.
-# - dùng trainer Proposed 4.3 hiện có trong repo;
-# - multi-UI centers vẫn build/load vì trainer hiện tại cần;
-# - UI extra loss tắt bằng UI_LAMBDA = 0.0;
-# - perceptibility attention bật;
-# - chạy 5 clean eval + synthetic degraded eval sau train.
+# FIX INCLUDED:
+# - patch write_manifest() mkdir lỗi run_manifest.json
+# - patch perceptibility_attention.py để tránh lỗi fp16/fp32:
+#   RuntimeError: Input type (c10::Half) and bias type (float) should be the same
+# - patch attention_maps() đúng với bản mới return dict:
+#   {"channel": A_c, "spatial": A_s, "combined": M}
+# - Core runner dùng train_proposed_4_3_core_kaggle.py
+# - UI centers severity = 5
+# - degraded eval severity = 1,3,5
 
 # %%
 from pathlib import Path
@@ -91,6 +91,76 @@ for k in list(sys.modules.keys()):
         sys.modules.pop(k)
 
 # -----------------------------
+# 3.5 PATCH lỗi FP16/FP32 trong perceptibility_attention.py
+# Compatible với bản attention_maps() mới return dict:
+# {
+#   "channel": A_c,
+#   "spatial": A_s,
+#   "combined": M,
+# }
+# -----------------------------
+attention_file = ARCFACE_DIR / "perceptibility_attention.py"
+att_text = attention_file.read_text(encoding="utf-8")
+
+if "orig_dtype = feature_map.dtype" in att_text and "x = feature_map.float()" in att_text:
+    print("Patch already exists: perceptibility_attention.py is dtype-safe.")
+else:
+    start = att_text.find("    def attention_maps(")
+    end = att_text.find("    def apply_attention(", start)
+
+    if start == -1 or end == -1:
+        print("[WARN] Could not locate attention_maps/apply_attention block. Showing context:")
+        idx = att_text.find("attention_maps")
+        print(att_text[max(0, idx - 500): idx + 1200])
+        raise RuntimeError("Patch failed. Need manual check of perceptibility_attention.py")
+
+    replacement = '''    def attention_maps(self, feature_map: torch.Tensor):
+        if feature_map.ndim != 4:
+            raise ValueError(
+                f"PerceptibilityAttentionModule expects 4D input [B,C,H,W], got {feature_map.shape}"
+            )
+
+        orig_dtype = feature_map.dtype
+
+        # Attention layers are float32 by default. During fp16 training/eval,
+        # feature_map can be float16, causing:
+        # RuntimeError: Input type (c10::Half) and bias type (float) should be the same.
+        # Compute attention maps in fp32, then cast maps back to original dtype.
+        x = feature_map.float() if feature_map.dtype in (torch.float16, torch.bfloat16) else feature_map
+
+        # --- Channel attention ---
+        avg_c = F.adaptive_avg_pool2d(x, 1)  # [B, C, 1, 1]
+        max_c = F.adaptive_max_pool2d(x, 1)  # [B, C, 1, 1]
+        A_c = torch.sigmoid(self.channel_mlp(avg_c) + self.channel_mlp(max_c))  # [B, C, 1, 1]
+        F_c = A_c * x  # [B, C, H, W]
+
+        # --- Spatial attention ---
+        avg_s = F_c.mean(dim=1, keepdim=True)          # [B, 1, H, W]
+        max_s = F_c.max(dim=1, keepdim=True).values    # [B, 1, H, W]
+        A_s = torch.sigmoid(
+            self.spatial_conv(torch.cat([avg_s, max_s], dim=1))
+        )  # [B, 1, H, W]
+
+        M = A_c * A_s  # [B, C, H, W]
+
+        return {
+            "channel": A_c.to(dtype=orig_dtype),
+            "spatial": A_s.to(dtype=orig_dtype),
+            "combined": M.to(dtype=orig_dtype),
+        }
+
+'''
+
+    new_att_text = att_text[:start] + replacement + att_text[end:]
+    attention_file.write_text(new_att_text, encoding="utf-8")
+    print("Patched perceptibility_attention.py: dtype-safe dict attention_maps().")
+
+# Clear possible module cache.
+for k in list(sys.modules.keys()):
+    if "perceptibility_attention" in k or "proposed_4_3_attention_model" in k:
+        sys.modules.pop(k)
+
+# -----------------------------
 # 4. Import runner sau khi patch
 # -----------------------------
 import kaggle_5eval_degraded_common as common
@@ -165,6 +235,7 @@ RUNNER_FILE = "kaggle_proposed_4_3_core_5eval_degraded_runner.py"
 RUNNER_KIND = "proposed4_3"
 OUTPUT_SUBDIR = "proposed_4_3_core"
 BACKUP_ZIP_NAME = "proposed_4_3_core_20ep_5eval_degraded_s135.zip"
+
 # Core degraded eval must also load the attention wrapper so inference uses x'.
 DEGRADED_EVAL_SCRIPT = "eval_degraded_proposed_4_3_full.py"
 
@@ -313,6 +384,7 @@ def ensure_multi_ui_centers():
         "--include-global",
         "--overwrite",
     ]
+
     if CENTERED_ATTENTION:
         cmd.append("--centered-attention")
 
