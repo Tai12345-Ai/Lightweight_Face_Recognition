@@ -1,8 +1,11 @@
 """Convert colab_phase2_loss_comparison.py (percent-format) to .ipynb notebook."""
-import json, re
+from pathlib import Path
+import json
+import re
 
-INPUT = r"d:\projects\Project-2\insightface\recognition\arcface_torch\colab_phase2_loss_comparison.py"
-OUTPUT = r"d:\projects\Project-2\insightface\recognition\arcface_torch\colab_phase2_loss_comparison.ipynb"
+NOTEBOOK_DIR = Path(__file__).resolve().parent
+INPUT = NOTEBOOK_DIR / "colab_phase2_loss_comparison.py"
+OUTPUT = NOTEBOOK_DIR / "colab_phase2_loss_comparison.ipynb"
 
 with open(INPUT, "r", encoding="utf-8") as f:
     content = f.read()

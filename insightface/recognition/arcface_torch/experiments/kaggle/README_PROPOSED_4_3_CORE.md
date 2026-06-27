@@ -1,19 +1,26 @@
 # Proposed 4.3 Core Kaggle Runner
 
-Copy these two files into:
+Files now live in:
 
 ```text
-insightface/recognition/arcface_torch/
+insightface/recognition/arcface_torch/experiments/kaggle/
 ```
 
-Files:
+Entry files:
 
 ```text
 kaggle_proposed_4_3_core_5eval_degraded_runner.py
 kaggle_proposed_4_3_core_report.py
 ```
 
-Run the runner as a Kaggle notebook/script.
+From `insightface/recognition/arcface_torch`, run:
+
+```bash
+python experiments/kaggle/kaggle_proposed_4_3_core_5eval_degraded_runner.py
+```
+
+In a Kaggle notebook, use `%run` with the same path after the repo exists in
+`/kaggle/working`.
 
 ## What this Core runner does
 

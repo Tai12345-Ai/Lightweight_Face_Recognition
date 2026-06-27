@@ -8,13 +8,13 @@ experiments in this repository.
 Run Core:
 
 ```python
-%run kaggle_proposed_4_3_core_5eval_degraded_runner.py
+%run experiments/kaggle/kaggle_proposed_4_3_core_5eval_degraded_runner.py
 ```
 
 Run Full:
 
 ```python
-%run kaggle_proposed_4_3_full_5eval_degraded_runner.py
+%run experiments/kaggle/kaggle_proposed_4_3_full_5eval_degraded_runner.py
 ```
 
 Both runners auto-detect:

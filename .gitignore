@@ -5,6 +5,7 @@ __pycache__/
 
 # Local InsightFace/cache folders
 .insightface/
+.matplotlib_cache/
 
 # Datasets and generated training outputs
 dataset/
@@ -14,6 +15,9 @@ outputs/
 work_dirs/
 checkpoints/
 checkpoint/
+runs/
+logs/
+wandb/
 
 # Large model/checkpoint/artifact files
 *.pth
@@ -22,3 +26,5 @@ checkpoint/
 *.bin
 *.rec
 *.idx
+*.zip
+*.log

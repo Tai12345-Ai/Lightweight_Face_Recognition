@@ -56,7 +56,7 @@ subprocess.run([
 # 3. PATCH lỗi run_manifest.json
 # PHẢI patch TRƯỚC khi import kaggle_5eval_degraded_common
 # -----------------------------
-common_file = ARCFACE_DIR / "kaggle_5eval_degraded_common.py"
+common_file = ARCFACE_DIR / "experiments" / "kaggle" / "kaggle_5eval_degraded_common.py"
 text = common_file.read_text(encoding="utf-8")
 
 already_patched = "current_exp_dir.mkdir(parents=True, exist_ok=True)" in text
@@ -99,7 +99,7 @@ for k in list(sys.modules.keys()):
 #   "combined": M,
 # }
 # -----------------------------
-attention_file = ARCFACE_DIR / "perceptibility_attention.py"
+attention_file = ARCFACE_DIR / "lightweight_fr" / "proposed_4_3" / "perceptibility_attention.py"
 att_text = attention_file.read_text(encoding="utf-8")
 
 if "orig_dtype = feature_map.dtype" in att_text and "x = feature_map.float()" in att_text:
